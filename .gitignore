@@ -1,0 +1,47 @@
+# Dependências
+node_modules/
+package-lock.json
+.pnpm-lock.yaml
+
+# Cache / Downloads
+music_cache_opus/
+temp_downloads/
+
+# Banco local
+utils/music.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.*.local
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build / Dist
+dist/
+build/
+*.log
+
+# Arquivos temporários
+*.tmp
+*.part
+*.temp
+
+# Sistema
+Thumbs.db
+.DS_Store
+
+# Documentação temporária (não versionar)
+ANALISE_*.md
+OTIMIZACOES_*.md
+*.tar.gz
+*.zip

@@ -1,0 +1,36 @@
+{
+  "name": "morphbot",
+  "version": "1.0.0",
+  "description": "MorphBot - Discord music bot with ultra-fast Opus streaming and smart cache",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node start.js",
+    "dev": "node start.js"
+  },
+  "keywords": [
+    "discord",
+    "discord-bot",
+    "music-bot",
+    "opus",
+    "yt-dlp",
+    "ffmpeg",
+    "sqlite",
+    "morphbot"
+  ],
+  "author": "MorphBot",
+  "license": "MIT",
+  "dependencies": {
+    "@discordjs/voice": "^0.19.0",
+    "@snazzah/davey": "^0.1.8",
+    "axios": "^1.13.2",
+    "better-sqlite3": "^9.4.0",
+    "discord.js": "^14.25.1",
+    "dotenv": "^16.4.5",
+    "libsodium-wrappers": "^0.7.15",
+    "tweetnacl": "^1.0.3"
+  }
+}
