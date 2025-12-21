@@ -38,7 +38,8 @@ function startBot() {
 
   const bot = spawn('node', ['index.js'], {
     stdio: 'inherit',
-    shell: false
+    shell: false,
+    env: { ...process.env, __MORPHBOT_STARTER: '1' }
   });
 
   bot.on('exit', (code, signal) => {
