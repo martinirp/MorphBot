@@ -1,5 +1,3 @@
-const path = require('path');
-const { spawn } = require('child_process');
 const { PermissionsBitField } = require('discord.js');
 const queueManager = require('../utils/queueManager');
 const { createEmbed } = require('../utils/embed');
@@ -28,7 +26,7 @@ module.exports = {
         createEmbed()
           .setColor(0xf1c40f)
           .setTitle('🔄 Reiniciando bot')
-          .setDescription('Encerrando conexões e reiniciando...')
+          .setDescription('Encerrando conexões...')
       ]
     });
 
@@ -41,31 +39,28 @@ module.exports = {
         }
       }
 
+      // Dar um tempo para desconectar
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
       await statusMsg.edit({
         embeds: [
           createEmbed()
             .setColor(0x2ecc71)
             .setTitle('🔄 Reiniciando')
-            .setDescription('Saindo agora, voltarei em instantes...')
+            .setDescription('Voltando em segundos... 🚀')
         ]
       });
 
-      const startJsPath = path.join(__dirname, '..', 'start.js');
+      // Fechar cliente Discord e encerrar processo
+      // O hosting (Replit, Railway, etc) detectará o crash e reiniciará
+      console.log('[RESET] Encerrando processo para reinicialização...');
+      
+      try {
+        await client.destroy();
+      } catch {}
 
-      // Se foi iniciado pelo start.js, basta encerrar que ele reinicia.
-      if (process.env.__MORPHBOT_STARTER === '1') {
-        process.exit(0);
-        return;
-      }
-
-      // Caso contrário, iniciar o start.js de forma destacada e encerrar.
-      const child = spawn(process.execPath, [startJsPath], {
-        detached: true,
-        stdio: 'ignore'
-      });
-      child.unref();
-
-      process.exit(0);
+      // Exit com code 1 força o hosting a reiniciar
+      process.exit(1);
     } catch (error) {
       console.error('[RESET] erro:', error);
       await statusMsg.edit({
