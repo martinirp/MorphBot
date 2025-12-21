@@ -19,6 +19,7 @@ const { getVideoDetails } = require('./youtubeApi');
 class QueueManager {
   constructor() {
     this.guilds = new Map();
+    this.selfDisconnecting = new Set(); // Rastreia desconexões iniciadas pelo bot
   }
 
   get(guildId) {
@@ -87,7 +88,15 @@ class QueueManager {
         embeds: [createEmbed().setDescription('Fila encerrada.')]
       }).catch(() => {});
 
+      // Iniciar timer para desconectar se vazio
+      this.startAutoDisconnect(guildId);
       return;
+    }
+
+    // Cancelar auto-disconnect se tinha
+    if (g.emptyTimeout) {
+      clearTimeout(g.emptyTimeout);
+      g.emptyTimeout = null;
     }
 
     g.current = song;
@@ -196,16 +205,19 @@ class QueueManager {
 
     if (g.currentStream) {
       try { g.currentStream.destroy(); } catch {}
-      g.currentStream = null;
     }
 
-    try { g.player.stop(true); } catch {}
-    g.current = null;
+    this.next(guildId);
   }
 
-  resetGuild(guildId) {
+  resetGuild(guildId, options = {}) {
     const g = this.guilds.get(guildId);
     if (!g) return;
+
+    if (g.emptyTimeout) {
+      clearTimeout(g.emptyTimeout);
+      g.emptyTimeout = null;
+    }
 
     if (g.currentStream) {
       try { g.currentStream.destroy(); } catch {}
@@ -217,6 +229,52 @@ class QueueManager {
     try { g.connection?.destroy(); } catch {}
 
     this.guilds.delete(guildId);
+
+    // Preservar flag se especificado (para auto-disconnect)
+    if (!options.preserveSelfFlag) {
+      this.selfDisconnecting.delete(guildId);
+    }
+  }
+
+  startAutoDisconnect(guildId) {
+    const g = this.get(guildId);
+    if (!g) return;
+
+    // Já tem timeout? ignora
+    if (g.emptyTimeout) return;
+
+    g.emptyTimeout = setTimeout(() => {
+      const guild = this.get(guildId);
+      if (!guild || guild.playing || guild.queue.length > 0) return;
+
+      this.selfDisconnecting.add(guildId);
+      this.resetGuild(guildId, { preserveSelfFlag: true });
+
+      guild.textChannel?.send({
+        embeds: [createEmbed().setDescription('⏱️ Desconectado por inatividade.')]
+      }).catch(() => {});
+
+      // Limpar flag após 5s
+      setTimeout(() => this.selfDisconnecting.delete(guildId), 5000);
+    }, 5 * 60 * 1000); // 5 minutos
+  }
+
+  checkIfAlone(guildId) {
+    const g = this.get(guildId);
+    if (!g?.voiceChannel) return;
+
+    const members = g.voiceChannel.members.filter(m => !m.user.bot);
+
+    if (members.size === 0) {
+      this.selfDisconnecting.add(guildId);
+      this.resetGuild(guildId, { preserveSelfFlag: true });
+
+      g.textChannel?.send({
+        embeds: [createEmbed().setDescription('👋 Desconectado (sozinho no canal).')]
+      }).catch(() => {});
+
+      setTimeout(() => this.selfDisconnecting.delete(guildId), 5000);
+    }
   }
 }
 

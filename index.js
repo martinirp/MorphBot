@@ -217,9 +217,22 @@ client.on(Events.InteractionCreate, async interaction => {
 // ===============================================
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   try {
-    if (oldState.member?.id !== client.user.id) return;
-
     const guildId = oldState.guild.id;
+
+    // ============================================
+    // 👤 Alguém saiu do canal → verificar se bot ficou sozinho
+    // ============================================
+    if (oldState.channelId && !newState.channelId && oldState.member?.id !== client.user.id) {
+      const botVoiceState = oldState.guild.members.me?.voice;
+      if (botVoiceState?.channelId === oldState.channelId) {
+        setTimeout(() => queueManager.checkIfAlone(guildId), 1000);
+      }
+    }
+
+    // ============================================
+    // 🤖 Eventos do próprio bot
+    // ============================================
+    if (oldState.member?.id !== client.user.id) return;
 
     const wasMuted = oldState.serverMute || oldState.selfMute;
     const isMuted = newState.serverMute || newState.selfMute;
@@ -247,6 +260,11 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
 
     const botKicked = oldState.channelId && !newState.channelId;
     if (!botKicked) return;
+
+    // Verificar se foi auto-disconnect
+    if (queueManager.selfDisconnecting.has(guildId)) {
+      return; // Não mostrar mensagem de kick
+    }
 
     resettingGuilds.add(guildId);
 
