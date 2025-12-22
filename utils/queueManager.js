@@ -611,6 +611,10 @@ class QueueManager {
       .replace(/\s*\[high\s+quality\]/gi, '')
       .replace(/\s*\(official\s+[^)]*\)/gi, '')
       .replace(/\s*\[official\s+[^\]]*\]/gi, '')
+      .replace(/\s*\(\d{4}\s+remaster\)/gi, '')
+      .replace(/\s*\[\d{4}\s+remaster\]/gi, '')
+      .replace(/\s*\(remaster(?:ed)?\)/gi, '')
+      .replace(/\s*\[remaster(?:ed)?\]/gi, '')
       .replace(/\s*-\s*(official|lyric|video|audio)(\s+video)?$/gi, '')
       .replace(/\s+/g, ' ')
       .trim();
