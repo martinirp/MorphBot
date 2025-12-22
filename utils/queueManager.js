@@ -333,10 +333,10 @@ class QueueManager {
       const currentTitle = g.current.title || '';
       const primaryTokens = new Set(tokenize(currentTitle));
 
-      // Guardar artista/track atuais para evitar repetir sempre o mesmo artista
+      // Contagem por artista para permitir no máx. 1 música por artista (incluindo o atual)
+      const artistCount = new Map();
       let currentArtist = '';
       let currentTrack = '';
-      const addedArtists = new Set();
 
       let recommendations = [];
 
@@ -352,12 +352,11 @@ class QueueManager {
           const trackName = extracted.track;
           currentArtist = (artistName || '').toLowerCase();
           currentTrack = (trackName || '').toLowerCase();
-          if (currentArtist) addedArtists.add(currentArtist);
 
           console.log(`[AUTODJ] 🎨 Artist: "${artistName}" | 🎵 Track: "${trackName}"`);
 
           if (artistName && trackName) {
-            const lastfmRecs = await this._getRecommendationsFromLastFM(artistName, trackName, 2);
+            const lastfmRecs = await this._getRecommendationsFromLastFM(artistName, trackName, count * 3);
             if (lastfmRecs && lastfmRecs.length > 0) {
               recommendations = lastfmRecs.map(r => ({
                 source: 'lastfm',
@@ -387,7 +386,7 @@ class QueueManager {
             const token = await this._getSpotifyToken();
             const recRes = await require('axios').get('https://api.spotify.com/v1/recommendations', {
               headers: { Authorization: `Bearer ${token}` },
-              params: { seed_tracks: spotifyId, limit: count * 2 }
+              params: { seed_tracks: spotifyId, limit: count * 3 }
             });
             if (recRes.data.tracks) {
               recommendations = recRes.data.tracks.map(t => ({
@@ -408,7 +407,7 @@ class QueueManager {
         if (process.env.GEMINI_API_KEY) {
           try {
             console.log('[AUTODJ] Fallback para Gemini...');
-            const geminiRecs = await this._getRecommendationsFromGemini(currentTitle, count * 2);
+            const geminiRecs = await this._getRecommendationsFromGemini(currentTitle, count * 3);
             if (geminiRecs && geminiRecs.length > 0) {
               recommendations = geminiRecs.map(r => ({
                 source: 'gemini',
@@ -428,7 +427,7 @@ class QueueManager {
           console.log('[AUTODJ] Fallback para YouTube...');
           const { searchYouTubeMultiple } = require('./youtubeApi');
           const titleForSearch = currentTitle.replace(/\[.*?\]|\(.*?\)/g, '').trim();
-          const sres = await searchYouTubeMultiple(titleForSearch, count * 3);
+          const sres = await searchYouTubeMultiple(titleForSearch, count * 4);
           if (sres && sres.length > 0) {
             const nonMusicKeywords = ['cooking', 'recipe', 'vlog', 'tutorial', 'howto', 'asmr', 'challenge', 'prank', 'reaction', 'gameplay'];
             recommendations = sres
@@ -465,10 +464,13 @@ class QueueManager {
         const recArtist = (rec.title.split(' - ')[0] || '').trim().toLowerCase();
         const recTokens = tokenize(rec.title || '');
 
-        // Evitar repetir artista (inclui o artista da faixa atual)
-        if (recArtist && addedArtists.has(recArtist)) {
-          console.log(`[AUTODJ FILTER] REJEITADO: artista repetido (${recArtist})`);
-          continue;
+        // Evitar repetir artista: no máximo 1 por artista
+        if (recArtist) {
+          const c = artistCount.get(recArtist) || 0;
+          if (c >= 1) {
+            console.log(`[AUTODJ FILTER] REJEITADO: artista repetido (${recArtist})`);
+            continue;
+          }
         }
 
         // Last.FM já garante similaridade, então pula o filtro de tokens
@@ -554,7 +556,7 @@ class QueueManager {
 
         console.log(`[AUTODJ] ✅ ACEITO: "${rec.title}"`);
 
-        if (recArtist) addedArtists.add(recArtist);
+        if (recArtist) artistCount.set(recArtist, (artistCount.get(recArtist) || 0) + 1);
 
         // Add to queue
         const dbSong = require('./db').getByVideoId(videoId);
