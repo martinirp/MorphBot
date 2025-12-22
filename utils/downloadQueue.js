@@ -7,7 +7,7 @@ class DownloadQueue {
   constructor() {
     this.guilds = new Map();
     this.active = 0;
-    this.MAX_CONCURRENCY = 3;
+    this.MAX_CONCURRENCY = Number(process.env.DOWNLOAD_CONCURRENCY || 4);
   }
 
   get(guildId) {

@@ -12,6 +12,7 @@ const {
 
 const { createOpusStream, createOpusStreamFromUrl } = require('./stream');
 const { createEmbed, createSongEmbed } = require('./embed');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const cachePath = require('./cachePath');
 const downloadQueue = require('./downloadQueue');
 const { getVideoDetails } = require('./youtubeApi');
@@ -41,6 +42,9 @@ class QueueManager {
         textChannel: null,
         voiceChannel: null,
         emptyTimeout: null
+        ,
+        loop: false,
+        nowPlayingMessage: null
       });
     }
     return this.guilds.get(guildId);
@@ -78,7 +82,13 @@ class QueueManager {
 
   async next(guildId) {
     const g = this.get(guildId);
-    const song = g.queue.shift();
+    // Se loop ativo, reaproveita a música atual em vez de puxar da fila
+    let song;
+    if (g.loop && g.current) {
+      song = g.current;
+    } else {
+      song = g.queue.shift();
+    }
 
     if (!song) {
       g.current = null;
@@ -168,9 +178,39 @@ class QueueManager {
 
     const songData = song.metadata ? { ...song, ...song.metadata } : song;
 
-    g.textChannel?.send({
-      embeds: [createSongEmbed(songData, 'playing')]
-    }).catch(() => {});
+    try {
+      const loopOn = !!g.loop;
+      const loopButton = new ButtonBuilder()
+        .setCustomId('loop_toggle')
+        .setLabel('Loop')
+        .setStyle(loopOn ? ButtonStyle.Success : ButtonStyle.Secondary)
+        .setEmoji('🔁');
+
+      const row = new ActionRowBuilder().addComponents(loopButton);
+
+      // Se estamos reaproveitando a mesma faixa por causa do loop e já temos uma mensagem "Now Playing",
+      // não reenviamos o embed para evitar spam. Apenas atualizamos o player e reutilizamos a mensagem.
+      if (g.loop && g.current && g.nowPlayingMessage) {
+        // Apenas atualiza o embed no caso do loop estar ativo (mantendo o mesmo message)
+        try {
+          const existing = g.nowPlayingMessage;
+          const newEmbed = createSongEmbed(songData, 'playing', loopOn);
+          await existing.edit({ embeds: [newEmbed], components: [row] }).catch(() => {});
+        } catch (err) {
+          // se falhar ao editar, ignoramos silenciosamente
+        }
+      } else {
+        const sent = await g.textChannel?.send({
+          embeds: [createSongEmbed(songData, 'playing', loopOn)],
+          components: [row]
+        });
+
+        if (sent) g.nowPlayingMessage = sent;
+      }
+    } catch (e) {
+      // Falha em enviar componentes não é crítico
+      try { g.textChannel?.send({ embeds: [createSongEmbed(songData, 'playing')] }); } catch {}
+    }
 
     // 🟢 Prefetch próxima música se existir na fila
     if (g.queue.length > 0) {
