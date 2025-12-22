@@ -333,6 +333,11 @@ class QueueManager {
       const currentTitle = g.current.title || '';
       const primaryTokens = new Set(tokenize(currentTitle));
 
+      // Guardar artista/track atuais para evitar repetir sempre o mesmo artista
+      let currentArtist = '';
+      let currentTrack = '';
+      const addedArtists = new Set();
+
       let recommendations = [];
 
       // Step 1: LAST.FM COMO PRIMEIRA OPÇÃO (melhor similaridade)
@@ -345,6 +350,9 @@ class QueueManager {
           const extracted = await this._extractArtistTrack(g.current);
           const artistName = extracted.artist;
           const trackName = extracted.track;
+          currentArtist = (artistName || '').toLowerCase();
+          currentTrack = (trackName || '').toLowerCase();
+          if (currentArtist) addedArtists.add(currentArtist);
 
           console.log(`[AUTODJ] 🎨 Artist: "${artistName}" | 🎵 Track: "${trackName}"`);
 
@@ -454,7 +462,14 @@ class QueueManager {
       for (const rec of recommendations) {
         if (added >= count) break;
 
+        const recArtist = (rec.title.split(' - ')[0] || '').trim().toLowerCase();
         const recTokens = tokenize(rec.title || '');
+
+        // Evitar repetir artista (inclui o artista da faixa atual)
+        if (recArtist && addedArtists.has(recArtist)) {
+          console.log(`[AUTODJ FILTER] REJEITADO: artista repetido (${recArtist})`);
+          continue;
+        }
 
         // Last.FM já garante similaridade, então pula o filtro de tokens
         if (rec.source === 'lastfm') {
@@ -538,6 +553,8 @@ class QueueManager {
         }
 
         console.log(`[AUTODJ] ✅ ACEITO: "${rec.title}"`);
+
+        if (recArtist) addedArtists.add(recArtist);
 
         // Add to queue
         const dbSong = require('./db').getByVideoId(videoId);
