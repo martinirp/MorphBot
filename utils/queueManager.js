@@ -205,110 +205,13 @@ class QueueManager {
         }
       }
 
-      // Se Auto estiver ativado, gerar recomendações e adicionar à fila
+      // 🎵 AUTO-RECOMENDAÇÕES LAST.FM (se autoDJ estiver ativado, adiciona 2 músicas automaticamente)
       if (g.autoDJ && song.videoId) {
         try {
-          const { searchYouTubeMultiple } = require('./youtubeApi');
-          let related = null;
-
-          // Preferir recomendações via Spotify se a música atual tiver spotifyId
-          try {
-            const spotifyId = song.metadata?.spotifyId || (song.videoId && song.metadata && song.metadata.spotifyId);
-            if (spotifyId) {
-              const { getSpotifyRecommendations } = require('./spotifyResolver');
-              const srec = await getSpotifyRecommendations(spotifyId, 5);
-              if (srec && srec.length > 0) {
-                // Map Spotify recs to same shape as YouTube related items
-                related = srec.map(r => ({ videoId: null, title: `${r.artists} - ${r.title}`, channel: r.artists, thumbnail: null, spotifyTrackId: r.trackId }));
-              }
-            }
-          } catch (spErr) {
-            console.error('[AUTODJ] erro ao obter recommendations do Spotify:', spErr);
-          }
-
-          // Se não obteve de Spotify, usar fallback baseado em busca por título/canal
-          if (!related || related.length === 0) {
-            try {
-              const titleForSearch = (song.title || '').replace(/\[.*?\]|\(.*?\)/g, '').trim();
-              const channel = song.channel || (song.metadata && song.metadata.channel) || '';
-              const queries = [];
-              if (titleForSearch) queries.push(titleForSearch);
-              if (channel && titleForSearch) queries.push(`${titleForSearch} ${channel}`);
-              if (channel) queries.push(`music from ${channel}`);
-
-              for (const q of queries) {
-                const sres = await searchYouTubeMultiple(q, 5);
-                if (sres && sres.length > 0) {
-                  related = sres;
-                  break;
-                }
-              }
-            } catch (fe) {
-              console.error('[AUTODJ] fallback de recomendações falhou:', fe);
-            }
-          }
-
-          if (related && related.length > 0) {
-            let added = 0;
-            // tokens da música atual para deduplicação
-            const currentTokens = new Set(tokenize(song.title || songData.title || ''));
-
-            for (const item of related) {
-              if (added >= 2) break;
-
-              // Se item não tiver videoId (ex.: recomendação do Spotify), tentar resolver via resolver
-              if (!item.videoId) {
-                try {
-                  const res = await resolve(item.title);
-                  if (res && res.videoId) {
-                    item.videoId = res.videoId;
-                    item.title = res.title || item.title;
-                  } else {
-                    continue; // não conseguiu resolver
-                  }
-                } catch (e) {
-                  continue;
-                }
-              }
-
-              // evitar adicionar a mesma música ou já presente na fila
-              if (item.videoId === song.videoId) continue;
-              if (g.queue.some(s => s.videoId === item.videoId)) continue;
-
-              // deduplicação por similaridade de tokens no título (evita covers/versões repetidas)
-              const candidateTokens = tokenize(item.title || '');
-              if (candidateTokens.length > 0 && currentTokens.size > 0) {
-                const common = candidateTokens.filter(t => currentTokens.has(t));
-                const similarity = common.length / Math.max(1, Math.min(candidateTokens.length, currentTokens.size));
-                if (similarity >= 0.6) {
-                  continue; // considerada mesma música
-                }
-              }
-
-              const dbSong = require('./db').getByVideoId(item.videoId);
-              const songObj = dbSong || {
-                videoId: item.videoId,
-                title: item.title,
-                metadata: { channel: item.channel, thumbnail: item.thumbnail }
-              };
-
-              g.queue.push(songObj);
-              const downloadQueue = require('./downloadQueue');
-              if (!fs.existsSync(songObj.file || require('./cachePath')(songObj.videoId))) {
-                downloadQueue.enqueue(guildId, songObj);
-              }
-
-              added++;
-            }
-
-            if (added > 0) {
-              try {
-                g.textChannel?.send({ embeds: [createEmbed().setDescription(`🎶 Auto: adicionadas ${added} recomendações à fila.`)] }).catch(() => {});
-              } catch {}
-            }
-          }
-        } catch (err) {
-          console.error('[AUTODJ] erro ao buscar recomendações:', err);
+          console.log('[AUTODJ] 🎯 Adicionando recomendações automáticas do Last.FM...');
+          await this.addAutoRecommendations(guildId, 2);
+        } catch (autoErr) {
+          console.error('[AUTODJ] Erro ao adicionar recomendações automáticas:', autoErr.message);
         }
       }
     } catch (e) {
@@ -427,98 +330,125 @@ class QueueManager {
     if (!g || !g.current) return 0;
 
     try {
-      const axios = require('axios');
-      const { searchYouTubeMultiple } = require('./youtubeApi');
-
       const currentTitle = g.current.title || '';
       const primaryTokens = new Set(tokenize(currentTitle));
 
       let recommendations = [];
 
-      // Step 1: Try Spotify recommendations if trackId available
-      const spotifyId = g.current.metadata?.spotifyId;
-      if (spotifyId && process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET) {
+      // Step 1: LAST.FM COMO PRIMEIRA OPÇÃO (melhor similaridade)
+      if (process.env.LASTFM_API_KEY) {
         try {
-          const token = await this._getSpotifyToken();
-          const recRes = await axios.get('https://api.spotify.com/v1/recommendations', {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { seed_tracks: spotifyId, limit: count * 3 }
-          });
-          if (recRes.data.tracks) {
-            recommendations = recRes.data.tracks.map(t => ({
-              source: 'spotify',
-              title: `${t.artists.map(a => a.name).join(', ')} - ${t.name}`,
-              duration: Math.round(t.duration_ms / 1000)
-            }));
+          console.log('[AUTODJ] 🎯 Step 1: Buscando recomendações via Last.FM...');
+          console.log(`[AUTODJ] 📝 Título atual: "${currentTitle}"`);
+          
+          // Extrair artista e música
+          const extracted = await this._extractArtistTrack(g.current);
+          const artistName = extracted.artist;
+          const trackName = extracted.track;
+
+          console.log(`[AUTODJ] 🎨 Artist: "${artistName}" | 🎵 Track: "${trackName}"`);
+
+          if (artistName && trackName) {
+            const lastfmRecs = await this._getRecommendationsFromLastFM(artistName, trackName, 2);
+            if (lastfmRecs && lastfmRecs.length > 0) {
+              recommendations = lastfmRecs.map(r => ({
+                source: 'lastfm',
+                title: r
+              }));
+              console.log(`[AUTODJ] ✅ Last.FM retornou ${recommendations.length} recomendações`);
+            } else {
+              console.log(`[AUTODJ] ⚠️ Last.FM retornou array vazio`);
+            }
+          } else {
+            console.log(`[AUTODJ] ⚠️ Não conseguiu extrair artist/track do título`);
           }
-        } catch (spErr) {
-          console.error('[AUTODJ] Spotify recommendations error:', spErr.message);
+        } catch (lastfmErr) {
+          console.error('[AUTODJ] ❌ Last.FM error:', lastfmErr.message);
+          console.error('[AUTODJ] Stack:', lastfmErr.stack);
+        }
+      } else {
+        console.log('[AUTODJ] ⚠️ LASTFM_API_KEY não configurada');
+      }
+
+      // Step 2: Fallback para Spotify
+      if (recommendations.length === 0) {
+        const spotifyId = g.current.metadata?.spotifyId;
+        if (spotifyId && process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET) {
+          try {
+            console.log('[AUTODJ] Fallback para Spotify...');
+            const token = await this._getSpotifyToken();
+            const recRes = await require('axios').get('https://api.spotify.com/v1/recommendations', {
+              headers: { Authorization: `Bearer ${token}` },
+              params: { seed_tracks: spotifyId, limit: count * 2 }
+            });
+            if (recRes.data.tracks) {
+              recommendations = recRes.data.tracks.map(t => ({
+                source: 'spotify',
+                title: `${t.artists.map(a => a.name).join(', ')} - ${t.name}`,
+                duration: Math.round(t.duration_ms / 1000)
+              }));
+              console.log(`[AUTODJ] ✅ Spotify retornou ${recommendations.length} recomendações`);
+            }
+          } catch (spErr) {
+            console.error('[AUTODJ] Spotify error:', spErr.message);
+          }
         }
       }
 
-      // Step 2: Fallback to YouTube search - BUSCAR ESPECIFICAMENTE POR MÚSICA
+      // Step 3: Fallback para Gemini
+      if (recommendations.length === 0) {
+        if (process.env.GEMINI_API_KEY) {
+          try {
+            console.log('[AUTODJ] Fallback para Gemini...');
+            const geminiRecs = await this._getRecommendationsFromGemini(currentTitle, count * 2);
+            if (geminiRecs && geminiRecs.length > 0) {
+              recommendations = geminiRecs.map(r => ({
+                source: 'gemini',
+                title: r
+              }));
+              console.log(`[AUTODJ] ✅ Gemini retornou ${recommendations.length} recomendações`);
+            }
+          } catch (geminiErr) {
+            console.error('[AUTODJ] Gemini error:', geminiErr.message);
+          }
+        }
+      }
+
+      // Step 4: Fallback para YouTube
       if (recommendations.length === 0) {
         try {
-          // Extrair informações úteis do título atual
+          console.log('[AUTODJ] Fallback para YouTube...');
+          const { searchYouTubeMultiple } = require('./youtubeApi');
           const titleForSearch = currentTitle.replace(/\[.*?\]|\(.*?\)/g, '').trim();
-          // Adicionar "music" ou "song" para focar em conteúdo musical
-          const enhancedQueries = [
-            `${titleForSearch} music`,
-            `${titleForSearch} official`,
-            titleForSearch
-          ];
-
-          for (const query of enhancedQueries) {
-            const sres = await searchYouTubeMultiple(query, count * 3);
-            if (sres && sres.length > 0) {
-              // Filtrar a música atual e conteúdo claramente não-musical
-              const nonMusicKeywords = ['cooking', 'recipe', 'vlog', 'tutorial', 'howto', 'asmr', 'challenge', 'prank', 'reaction', 'gameplay'];
-              recommendations = sres
-                .filter(r => r.videoId !== g.current.videoId)
-                .filter(r => !nonMusicKeywords.some(kw => r.title.toLowerCase().includes(kw)))
-                .map(r => ({
-                  source: 'youtube',
-                  title: r.title,
-                  duration: r.duration,
-                  videoId: r.videoId
-                }));
-              
-              if (recommendations.length > 0) {
-                console.log(`[AUTODJ] YouTube search retornou ${recommendations.length} resultados`);
-                break;
-              }
-            }
+          const sres = await searchYouTubeMultiple(titleForSearch, count * 3);
+          if (sres && sres.length > 0) {
+            const nonMusicKeywords = ['cooking', 'recipe', 'vlog', 'tutorial', 'howto', 'asmr', 'challenge', 'prank', 'reaction', 'gameplay'];
+            recommendations = sres
+              .filter(r => r.videoId !== g.current.videoId)
+              .filter(r => !nonMusicKeywords.some(kw => r.title.toLowerCase().includes(kw)))
+              .map(r => ({
+                source: 'youtube',
+                title: r.title,
+                duration: r.duration,
+                videoId: r.videoId
+              }));
+            console.log(`[AUTODJ] ✅ YouTube retornou ${recommendations.length} recomendações`);
           }
         } catch (ytErr) {
-          console.error('[AUTODJ] YouTube search error:', ytErr.message);
+          console.error('[AUTODJ] YouTube error:', ytErr.message);
         }
       }
 
-      // Step 2B: Fallback to Gemini AI (terceira opção)
-      if (recommendations.length === 0 && process.env.GEMINI_API_KEY) {
-        try {
-          console.log('[AUTODJ] Fallback para Gemini AI...');
-          const geminiRecs = await this._getRecommendationsFromGemini(currentTitle, count * 3);
-          if (geminiRecs && geminiRecs.length > 0) {
-            recommendations = geminiRecs.map(r => ({
-              source: 'gemini',
-              title: r
-            }));
-            console.log(`[AUTODJ] Gemini retornou ${recommendations.length} recomendações`);
-          }
-        } catch (geminiErr) {
-          console.error('[AUTODJ] Gemini error:', geminiErr.message);
-        }
+      if (recommendations.length === 0) {
+        console.log('[AUTODJ] Nenhuma recomendação encontrada');
+        return 0;
       }
 
-      if (recommendations.length === 0) return 0;
-
-      // Step 3: Apply filters and deduplication
+      // Step 5: Apply filters and deduplication
       const stopwords = ['cover', 'live', 'stripped', 'acoustic', 'remix', 'karaoke', 'instrumental', 'solo'];
-      const durationTolerance = 30; // seconds
+      const durationTolerance = 30;
       const primaryDuration = g.current.metadata?.duration || 0;
-      const similarityThreshold = 0.5; // Mudei para lógica diferente abaixo
-      const minTokenOverlap = 1; // Deve ter pelo menos 1 token em comum
+      const minTokenOverlap = 1;
 
       let added = 0;
       for (const rec of recommendations) {
@@ -526,30 +456,36 @@ class QueueManager {
 
         const recTokens = tokenize(rec.title || '');
 
-        // Check token overlap - DEVE TER TOKENS EM COMUM
-        if (recTokens.length > 0 && primaryTokens.size > 0) {
-          const overlap = recTokens.filter(t => primaryTokens.has(t));
-          if (overlap.length < minTokenOverlap) {
-            console.log(`[AUTODJ FILTER] REJEITADO: sem tokens em comum. Primary: [${Array.from(primaryTokens).join(', ')}] vs Rec: [${recTokens.join(', ')}]`);
-            continue;
-          }
-
-          // Se TEM overlap, agora verifica similaridade Jaccard
-          const sim = this._jaccardSimilarity(Array.from(primaryTokens), recTokens);
-          // Se a similaridade é MUITO ALTA (>= 0.75), é provavelmente a mesma música
-          if (sim >= 0.75) {
-            console.log(`[AUTODJ FILTER] REJEITADO por similaridade muito alta: ${sim.toFixed(3)}`);
-            continue;
-          }
-          console.log(`[AUTODJ FILTER] similaridade OK: ${sim.toFixed(3)} (primary: [${Array.from(primaryTokens).join(', ')}] vs rec: [${recTokens.join(', ')}])`);
+        // Last.FM já garante similaridade, então pula o filtro de tokens
+        if (rec.source === 'lastfm') {
+          console.log(`[AUTODJ FILTER] ✅ Last.FM - pulando validação de tokens`);
         } else {
-          console.log(`[AUTODJ FILTER] REJEITADO: sem tokens suficientes para comparação`);
-          continue;
+          // Check token overlap - DEVE TER TOKENS EM COMUM (para outras fontes)
+          if (recTokens.length > 0 && primaryTokens.size > 0) {
+            const overlap = recTokens.filter(t => primaryTokens.has(t));
+            if (overlap.length < minTokenOverlap) {
+              console.log(`[AUTODJ FILTER] REJEITADO: sem tokens em comum`);
+              continue;
+            }
+
+            // Se TEM overlap, agora verifica similaridade Jaccard
+            const sim = this._jaccardSimilarity(Array.from(primaryTokens), recTokens);
+            if (sim >= 0.75) {
+              console.log(`[AUTODJ FILTER] REJEITADO por similaridade muito alta: ${sim.toFixed(3)}`);
+              continue;
+            }
+            console.log(`[AUTODJ FILTER] similaridade OK: ${sim.toFixed(3)}`);
+          } else {
+            if (rec.source !== 'gemini') {
+              console.log(`[AUTODJ FILTER] REJEITADO: sem tokens suficientes`);
+              continue;
+            }
+          }
         }
 
         // Check for stopwords
         if (stopwords.some(w => rec.title.toLowerCase().includes(w))) {
-          console.log(`[AUTODJ FILTER] REJEITADO por stopword (cover/live/stripped)`);
+          console.log(`[AUTODJ FILTER] REJEITADO por stopword`);
           continue;
         }
 
@@ -557,7 +493,7 @@ class QueueManager {
         if (rec.duration && primaryDuration > 0) {
           const durDiff = Math.abs(primaryDuration - rec.duration);
           if (durDiff > durationTolerance) {
-            console.log(`[AUTODJ FILTER] REJEITADO por duração (${rec.duration}s vs ${primaryDuration}s, diff=${durDiff}s, tolerance=${durationTolerance}s)`);
+            console.log(`[AUTODJ FILTER] REJEITADO por duração`);
             continue;
           }
         }
@@ -565,21 +501,28 @@ class QueueManager {
         // Resolve to get videoId
         let videoId = null;
         if (rec.videoId) {
-          // Já vem do YouTube fallback
           videoId = rec.videoId;
         } else {
-          // Precisa resolver (ex: Spotify ou Gemini)
           try {
-            console.log(`[AUTODJ] Resolvendo: "${rec.title}"`);
+            console.log(`[AUTODJ] 🔎 Resolvendo: "${rec.title}"`);
             const res = await resolve(rec.title);
             if (res && res.videoId) {
               videoId = res.videoId;
             } else {
-              console.log(`[AUTODJ FILTER] REJEITADO: não conseguiu resolver para videoId`);
-              continue;
+              // Se falhar, tenta busca direta no YouTube
+              console.log(`[AUTODJ] ⚠️ Resolve falhou, tentando YouTube direto...`);
+              const { searchYouTube } = require('./youtubeApi');
+              const ytRes = await searchYouTube(rec.title);
+              if (ytRes && ytRes.videoId) {
+                videoId = ytRes.videoId;
+                console.log(`[AUTODJ] ✅ YouTube direto encontrou: ${videoId}`);
+              } else {
+                console.log(`[AUTODJ FILTER] REJEITADO: não conseguiu resolver`);
+                continue;
+              }
             }
           } catch (e) {
-            console.log(`[AUTODJ FILTER] REJEITADO: erro ao resolver`, e.message);
+            console.log(`[AUTODJ FILTER] REJEITADO: erro ao resolver - ${e.message}`);
             continue;
           }
         }
@@ -661,7 +604,137 @@ class QueueManager {
     return uni === 0 ? 0 : inter / uni;
   }
 
-  // Helper: Get recommendations from Gemini AI
+  // Helper: Limpar título de sufixos do YouTube
+  _cleanTitle(title) {
+    return title
+      .replace(/\s*\(high\s+quality\)/gi, '')
+      .replace(/\s*\[high\s+quality\]/gi, '')
+      .replace(/\s*\(official\s+[^)]*\)/gi, '')
+      .replace(/\s*\[official\s+[^\]]*\]/gi, '')
+      .replace(/\s*-\s*(official|lyric|video|audio)(\s+video)?$/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Helper: Extrair Artist e Track do título
+  async _extractArtistTrack(song) {
+    // Limpar título primeiro
+    const cleanedTitle = this._cleanTitle(song.title);
+
+    // Opção 1: Já tem metadata com artist
+    if (song.metadata?.artist) {
+      return {
+        artist: song.metadata.artist,
+        track: this._cleanTitle(song.metadata.track || cleanedTitle)
+      };
+    }
+
+    // Opção 2: Spotify metadata - buscou via Spotify
+    if (song.metadata?.spotifyId) {
+      try {
+        const axios = require('axios');
+        const token = await this._getSpotifyToken();
+        const res = await axios.get(`https://api.spotify.com/v1/tracks/${song.metadata.spotifyId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.data) {
+          return {
+            artist: res.data.artists[0]?.name || '',
+            track: res.data.name
+          };
+        }
+      } catch (e) {
+        console.log(`[EXTRACT] Erro ao buscar Spotify: ${e.message}`);
+      }
+    }
+
+    // Opção 3: Tenta parsear do título (ex: "Artist - Track")
+    const parts = cleanedTitle.split(' - ');
+    if (parts.length >= 2) {
+      return {
+        artist: parts[0].trim(),
+        track: parts.slice(1).join(' - ').trim()
+      };
+    }
+
+    // Opção 4: Busca reversa no Last.FM (tenta encontrar artist para esse track)
+    console.log(`[EXTRACT] 🔍 Tentando busca reversa no Last.FM para: "${cleanedTitle}"`);
+    if (process.env.LASTFM_API_KEY) {
+      try {
+        const axios = require('axios');
+        const url = `https://ws.audioscrobbler.com/2.0/?method=track.search&track=${encodeURIComponent(cleanedTitle)}&limit=1&api_key=${process.env.LASTFM_API_KEY}&format=json`;
+        const res = await axios.get(url, { timeout: 5000 });
+        
+        const track = res.data?.results?.trackmatches?.track?.[0];
+        if (track && track.artist) {
+          console.log(`[EXTRACT] ✅ Encontrado no Last.FM: "${track.artist}" - "${track.name}"`);
+          return {
+            artist: track.artist,
+            track: track.name || cleanedTitle
+          };
+        }
+      } catch (e) {
+        console.log(`[EXTRACT] ⚠️ Erro na busca reversa Last.FM: ${e.message}`);
+      }
+    }
+
+    // Fallback: Retorna só o título
+    console.log(`[EXTRACT] ℹ️ Fallback: usando só o título`);
+    return {
+      artist: '',
+      track: cleanedTitle
+    };
+  }
+
+  // Helper: Get recommendations from Last.FM
+  async _getRecommendationsFromLastFM(artistName, trackName, limit = 5) {
+    const LASTFM_API_KEY = process.env.LASTFM_API_KEY;
+    if (!LASTFM_API_KEY) throw new Error('Last.FM API key not set');
+
+    try {
+      console.log(`[LASTFM] 🔍 Buscando: "${artistName}" - "${trackName}"`);
+      
+      const url =
+        `https://ws.audioscrobbler.com/2.0/?` +
+        `method=track.getsimilar` +
+        `&artist=${encodeURIComponent(artistName)}` +
+        `&track=${encodeURIComponent(trackName)}` +
+        `&limit=${limit}` +
+        `&api_key=${LASTFM_API_KEY}` +
+        `&format=json`;
+
+      console.log(`[LASTFM] 📡 URL: ${url}`);
+      
+      const res = await require('axios').get(url, { timeout: 5000 });
+      console.log(`[LASTFM] ✅ Status: ${res.status}`);
+      console.log(`[LASTFM] 📦 Response data:`, JSON.stringify(res.data).substring(0, 200));
+      
+      let tracks = res.data?.similartracks?.track ?? [];
+      console.log(`[LASTFM] 📋 Tracks antes de validação:`, Array.isArray(tracks), typeof tracks, tracks.length || 'N/A');
+      
+      // Garantir que é array (Last.FM retorna objeto se houver 1 resultado)
+      if (!Array.isArray(tracks)) {
+        console.log(`[LASTFM] ⚠️ Convertendo objeto para array`);
+        tracks = tracks ? [tracks] : [];
+      }
+
+      console.log(`[LASTFM] 📊 Total de tracks: ${tracks.length}`);
+      
+      const result = tracks.map(t => {
+        const formatted = `${t.artist.name} - ${t.name}`;
+        console.log(`[LASTFM] ✨ Formatado: "${formatted}"`);
+        return formatted;
+      });
+      
+      console.log(`[LASTFM] ✅ Retornando ${result.length} recomendações`);
+      return result;
+    } catch (err) {
+      console.error('[LASTFM] ❌ Error:', err.message);
+      console.error('[LASTFM] Stack:', err.stack);
+      return [];
+    }
+  }
+
   async _getRecommendationsFromGemini(musicTitle, limit = 5) {
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
     if (!GEMINI_API_KEY) throw new Error('Gemini API key not set');

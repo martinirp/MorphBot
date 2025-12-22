@@ -123,22 +123,31 @@ async function resolve(query) {
   } else {
     // Fallback: yt-dlp com flags de otimização
     console.log('[RESOLVER] YouTube API indisponível → fallback yt-dlp');
-    const { stdout } = await execPromise(
-      `yt-dlp "ytsearch1:${query}" --skip-download --no-playlist --no-warnings --extractor-retries 1 --socket-timeout 5 --print "%(id)s|||%(title)s"`
-    );
+    try {
+      const { stdout } = await execPromise(
+        `yt-dlp "ytsearch1:${query}" --skip-download --no-playlist --no-warnings --extractor-retries 1 --socket-timeout 5 --print "%(id)s|||%(title)s"`
+      );
 
-    if (!stdout) {
-      throw new Error('yt-dlp não retornou resultado');
+      if (!stdout) {
+        throw new Error('yt-dlp não retornou resultado');
+      }
+
+      const parts = stdout.trim().split('|||');
+      if (parts.length < 2) {
+        throw new Error('yt-dlp retornou formato inválido');
+      }
+
+      videoId = parts[0].trim();
+      title = parts[1].trim();
+      metadata = { source: 'yt-dlp' };
+
+      console.log(`[RESOLVER] yt-dlp resolveu → ${videoId} (${title})`);
+    } catch (ytdlpErr) {
+      console.error(`[RESOLVER] yt-dlp falhou: ${ytdlpErr.message}`);
+      throw ytdlpErr;
     }
-  db.insertKey(videoId, videoId);
+  }
 
-  return {
-    fromCache: false,
-    videoId,
-    title,
-    metadata
-  };
-} // =========================
   for (const v of variants) {
     db.insertKey(v, videoId);
   }
@@ -148,7 +157,8 @@ async function resolve(query) {
   return {
     fromCache: false,
     videoId,
-    title
+    title,
+    metadata
   };
 }
 

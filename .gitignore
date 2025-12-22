@@ -7,8 +7,8 @@ package-lock.json
 music_cache_opus/
 temp_downloads/
 
-
 .morphbot.lock
+
 # Banco local
 utils/music.db
 *.db-journal
@@ -37,6 +37,11 @@ build/
 *.tmp
 *.part
 *.temp
+
+# Testes / Debug
+teste.js
+test.js
+lastfm_*.json
 
 # Sistema
 Thumbs.db
