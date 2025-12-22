@@ -41,11 +41,11 @@ class QueueManager {
         connection: null,
         textChannel: null,
         voiceChannel: null,
-        emptyTimeout: null
-        ,
+        emptyTimeout: null,
         loop: false,
         autoDJ: false,
-        nowPlayingMessage: null
+        nowPlayingMessage: null,
+        failedAttempts: new Map()
       });
     }
     return this.guilds.get(guildId);
@@ -59,8 +59,11 @@ class QueueManager {
 
     song.file = song.file || cachePath(song.videoId);
 
-    console.log(`[QUEUE] ${guildId} → adicionando: ${song.title}`);
+    const wasPlaying = g.playing;
+    const queueSize = g.queue.length;
+    console.log(`[QUEUE] ${guildId} → adicionando: ${song.title} (playing=${wasPlaying}, queue_size=${queueSize})`);
     g.queue.push(song);
+    console.log(`[QUEUE] ${guildId} → fila agora tem ${g.queue.length} músicas`);
 
     if (!fs.existsSync(song.file)) {
       downloadQueue.enqueue(guildId, song);
@@ -75,9 +78,13 @@ class QueueManager {
       g.connection.subscribe(g.player);
     }
 
-    if (!g.playing) {
+    // IMPORTANTE: Só toca automaticamente se NÃO estava tocando nada
+    if (!wasPlaying) {
+      console.log(`[QUEUE] ${guildId} → iniciando playback (nada estava tocando)`);
       g.playing = true;
       this.next(guildId);
+    } else {
+      console.log(`[QUEUE] ${guildId} → adicionado à fila (já estava tocando, não inicia playback)`);
     }
   }
 
@@ -101,6 +108,19 @@ class QueueManager {
 
       // Iniciar timer para desconectar se vazio
       this.startAutoDisconnect(guildId);
+      return;
+    }
+
+    // Proteção contra loop infinito: se a mesma música falhar 3x seguidas, pula
+    if (!g.failedAttempts) g.failedAttempts = new Map();
+    const attempts = g.failedAttempts.get(song.videoId) || 0;
+    if (attempts >= 3) {
+      console.error(`[PLAYER] ${guildId} → música ${song.title} falhou 3x, pulando...`);
+      g.failedAttempts.delete(song.videoId);
+      g.textChannel?.send({
+        embeds: [createEmbed().setDescription(`❌ Erro ao tocar **${song.title}**, pulando...`)]
+      }).catch(() => {});
+      this.next(guildId);
       return;
     }
 
@@ -133,6 +153,12 @@ class QueueManager {
           console.error('[STREAM] erro:', err);
         }
         g.currentStream = null;
+        
+        // Incrementar contador de falhas
+        if (!g.failedAttempts) g.failedAttempts = new Map();
+        const attempts = g.failedAttempts.get(song.videoId) || 0;
+        g.failedAttempts.set(song.videoId, attempts + 1);
+        
         this.next(guildId);
       });
 
@@ -160,6 +186,8 @@ class QueueManager {
 
     g.player.once(AudioPlayerStatus.Idle, () => {
       g.currentStream = null;
+      // Limpar contador de falhas ao tocar com sucesso
+      if (g.failedAttempts) g.failedAttempts.delete(song.videoId);
       this.next(guildId);
     });
 
