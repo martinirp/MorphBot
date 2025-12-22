@@ -12,7 +12,7 @@ function createEmbed() {
  * @param {Object} song - Objeto com videoId, title, channel, thumbnail, duration, views
  * @param {string} status - Status ('playing', 'queued', 'added')
  */
-function createSongEmbed(song, status = 'playing') {
+function createSongEmbed(song, status = 'playing', loop = false) {
   const embed = createEmbed();
 
   const statusEmoji = {
@@ -30,6 +30,11 @@ function createSongEmbed(song, status = 'playing') {
 
   if (song.duration) {
     embed.addFields({ name: '⏱️ Duração', value: song.duration, inline: true });
+  }
+
+  // Mostrar estado de loop dentro do embed
+  if (status === 'playing') {
+    embed.addFields({ name: '🔁 Loop', value: loop ? 'Ativado' : 'Desativado', inline: true });
   }
 
   if (song.videoId) {

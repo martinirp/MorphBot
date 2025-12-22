@@ -7,6 +7,8 @@ package-lock.json
 music_cache_opus/
 temp_downloads/
 
+
+.morphbot.lock
 # Banco local
 utils/music.db
 *.db-journal

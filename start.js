@@ -4,43 +4,7 @@ const { spawn } = require('child_process');
 
 let backendStarted = false;
 
-// =============================
-// 🔒 Evitar múltiplas instâncias
-// =============================
-const lockFile = path.join(__dirname, '.morphbot.lock');
-
-function ensureSingleInstance() {
-  try {
-    if (fs.existsSync(lockFile)) {
-      const pidStr = fs.readFileSync(lockFile, 'utf-8').trim();
-      const existingPid = Number(pidStr);
-      if (existingPid && Number.isFinite(existingPid)) {
-        try {
-          process.kill(existingPid, 0); // verifica se processo existe
-          console.log(`⚠️ Já existe instância ativa (PID=${existingPid}). Encerrando esta.`);
-          process.exit(0);
-        } catch {
-          // PID não existe mais → bloquear novamente
-        }
-      }
-    }
-  } catch {}
-
-  try {
-    fs.writeFileSync(lockFile, String(process.pid));
-  } catch (e) {
-    console.error('❌ Não foi possível criar lockfile:', e);
-  }
-
-  const release = () => {
-    try { if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); } catch {}
-  };
-  process.on('exit', release);
-  process.on('SIGINT', () => { release(); process.exit(0); });
-  process.on('SIGTERM', () => { release(); process.exit(0); });
-}
-
-ensureSingleInstance();
+// (lockfile removed) single-instance check disabled to avoid false positives on some hosts
 
 function startBackendIfExists() {
   if (backendStarted) return;

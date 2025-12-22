@@ -8,7 +8,7 @@ module.exports = {
   description: 'Recarrega todos os comandos e utilitários',
   permission: 'ADMINISTRATOR',
 
-  async execute(message, client) {
+  async execute(message, client, args = []) {
     // =====================
     // 🔐 PERMISSÃO
     // =====================
@@ -36,6 +36,25 @@ module.exports = {
     });
 
     try {
+      // Suporte para reinício forçado via crash: `#reload force`
+      if (Array.isArray(args) && args[0] && ['force', 'crash', 'restart'].includes(args[0].toLowerCase())) {
+        await statusMsg.edit({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0xf1c40f)
+              .setTitle('🔄 Reinício forçado')
+              .setDescription('Encerrando o processo para que o iniciador reinicie o bot...')
+          ]
+        });
+
+        try {
+          await client.destroy();
+        } catch {}
+
+        // Sair com código não-zero para sinalizar restart ao host/start.js
+        process.exit(1);
+        return;
+      }
       // =====================
       // 🔥 RECARREGAR COMANDOS
       // =====================

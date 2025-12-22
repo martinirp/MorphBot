@@ -24,7 +24,7 @@ const path = require('path');
 const db = require('./utils/db');
 const cachePath = require('./utils/cachePath');
 const queueManager = require('./utils/queueManager');
-const { createEmbed } = require('./utils/embed');
+const { createEmbed, createSongEmbed } = require('./utils/embed');
 const { removeSongCompletely } = require('./utils/removeSong');
 
 // ===============================================
@@ -190,6 +190,44 @@ client.on(Events.InteractionCreate, async interaction => {
         { videoId: song.videoId, title: song.title, file: song.file },
         interaction.channel
       );
+    }
+
+    // Toggle loop button
+    if (interaction.isButton() && interaction.customId === 'loop_toggle') {
+      const guildId = interaction.guild.id;
+      const g = queueManager.get(guildId);
+
+      if (!g || !g.current) {
+        return interaction.reply({ content: '❌ Nenhuma música tocando.', ephemeral: true });
+      }
+
+      g.loop = !g.loop;
+
+      // Atualizar botão no embed agora tocando
+      try {
+        const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+        const loopBtn = new ButtonBuilder()
+          .setCustomId('loop_toggle')
+          .setLabel('Loop')
+          .setStyle(g.loop ? ButtonStyle.Success : ButtonStyle.Secondary)
+          .setEmoji('🔁');
+
+        const row = new ActionRowBuilder().addComponents(loopBtn);
+
+        if (g.nowPlayingMessage && !g.nowPlayingMessage.deleted) {
+          // Também atualiza o embed para refletir o novo estado de loop
+          try {
+            const newEmbed = createSongEmbed(g.current, 'playing', g.loop);
+            await g.nowPlayingMessage.edit({ embeds: [newEmbed], components: [row] }).catch(() => {});
+          } catch {
+            await g.nowPlayingMessage.edit({ components: [row] }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        console.error('[INTERACTION] erro ao atualizar botão de loop:', e.message);
+      }
+
+      return interaction.reply({ content: g.loop ? '🔁 Loop ativado' : '⏹️ Loop desativado', ephemeral: true });
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('lib_delete_')) {
