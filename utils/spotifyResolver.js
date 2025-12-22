@@ -65,7 +65,8 @@ async function resolveSpotifyTrack(spotifyUrl) {
     return {
       artist: artists,
       title: title,
-      query: `${artists} - ${title}`
+      query: `${artists} - ${title}`,
+      trackId: track.id
     };
   } catch (err) {
     console.error('[SPOTIFY] erro ao resolver track:', err.message);
@@ -73,7 +74,30 @@ async function resolveSpotifyTrack(spotifyUrl) {
   }
 }
 
+// Obter recomendações do Spotify baseadas em uma faixa seed
+async function getSpotifyRecommendations(seedTrackId, limit = 5) {
+  try {
+    const token = await getSpotifyToken();
+    const params = new URLSearchParams({ limit: String(limit), seed_tracks: seedTrackId });
+    const response = await axios.get(`https://api.spotify.com/v1/recommendations?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    if (!response.data || !response.data.tracks) return null;
+
+    return response.data.tracks.map(t => ({
+      trackId: t.id,
+      title: t.name,
+      artists: t.artists.map(a => a.name).join(', ')
+    }));
+  } catch (err) {
+    console.error('[SPOTIFY] erro ao obter recommendations:', err.response ? (err.response.data || err.response.status) : err.message);
+    return null;
+  }
+}
+
 module.exports = {
   resolveSpotifyTrack,
-  getSpotifyToken
+  getSpotifyToken,
+  getSpotifyRecommendations
 };

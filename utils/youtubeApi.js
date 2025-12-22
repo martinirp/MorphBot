@@ -157,44 +157,12 @@ async function getPlaylistItems(playlistId, maxResults = 100) {
 }
 
 /**
- * Busca vídeos relacionados (para Auto-DJ)
+ * Busca vídeos relacionados (para Auto)
  * @param {string} videoId - ID do vídeo de referência
  * @param {number} maxResults - Máximo de resultados (padrão 5)
  * @returns {Promise<Array|null>}
  */
-async function getRelatedVideos(videoId, maxResults = 5) {
-  if (!YOUTUBE_API_KEY) {
-    return null;
-  }
-
-  try {
-    const response = await axios.get(`${API_BASE}/search`, {
-      params: {
-        part: 'snippet',
-        relatedToVideoId: videoId,
-        type: 'video',
-        maxResults: maxResults,
-        key: YOUTUBE_API_KEY,
-        videoCategoryId: '10'
-      },
-      timeout: 5000
-    });
-
-    if (!response.data.items) {
-      return null;
-    }
-
-    return response.data.items.map(item => ({
-      videoId: item.id.videoId,
-      title: item.snippet.title,
-      channel: item.snippet.channelTitle,
-      thumbnail: item.snippet.thumbnails.default?.url
-    }));
-  } catch (error) {
-    console.error('[YOUTUBE API] Erro ao buscar relacionados:', error.message);
-    return null;
-  }
-}
+// Nota: removido endpoint `getRelatedVideos` devido a problemas de parâmetros.
 
 /**
  * Converte duração ISO 8601 para segundos e formato legível
@@ -218,6 +186,46 @@ function parseDuration(isoDuration) {
 module.exports = {
   searchYouTube,
   getVideoDetails,
-  getPlaylistItems,
-  getRelatedVideos
+  getPlaylistItems
 };
+
+// Busca múltiplos resultados no YouTube (útil para recomendações de fallback)
+async function searchYouTubeMultiple(query, maxResults = 5) {
+  if (!YOUTUBE_API_KEY) return null;
+
+  try {
+    const response = await axios.get(`${API_BASE}/search`, {
+      params: {
+        part: 'snippet',
+        q: query,
+        type: 'video',
+        maxResults: maxResults,
+        key: YOUTUBE_API_KEY
+      },
+      timeout: 5000
+    });
+
+    if (!response.data.items || response.data.items.length === 0) return null;
+
+    return response.data.items.map(item => ({
+      videoId: item.id.videoId,
+      title: item.snippet.title,
+      channel: item.snippet.channelTitle,
+      thumbnail: item.snippet.thumbnails.default?.url
+    }));
+  } catch (error) {
+    try {
+      if (error.response) {
+        console.error('[YOUTUBE API] Erro searchYouTubeMultiple:', error.response.status, error.response.data && (typeof error.response.data === 'object' ? JSON.stringify(error.response.data) : error.response.data));
+      } else {
+        console.error('[YOUTUBE API] Erro searchYouTubeMultiple:', error.message);
+      }
+    } catch (e) {
+      console.error('[YOUTUBE API] Erro ao tratar erro em searchYouTubeMultiple:', e.message);
+    }
+    return null;
+  }
+}
+
+// export adicional
+module.exports.searchYouTubeMultiple = searchYouTubeMultiple;

@@ -25,12 +25,17 @@ const db = require('./utils/db');
 const cachePath = require('./utils/cachePath');
 const queueManager = require('./utils/queueManager');
 const { createEmbed, createSongEmbed } = require('./utils/embed');
+const { resolve } = require('./utils/resolver');
+const { ActionRowBuilder, ButtonBuilder } = require('discord.js');
 const { removeSongCompletely } = require('./utils/removeSong');
 
 // ===============================================
 // 💬 Último canal de texto por guild
 // ===============================================
 const lastTextChannel = new Map();
+
+// Mapeia mensagens geradas para comandos externos (!p) → query
+const externalPMap = new Map();
 
 // ===============================================
 // 🔒 Guilds em reset (lock anti race-condition)
@@ -46,7 +51,9 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessageReactions,
   ],
+  partials: ['MESSAGE', 'CHANNEL', 'REACTION']
 });
 
 const PREFIXES = ['#', '$', '%', '&', '/'];
@@ -88,7 +95,53 @@ client.once(Events.ClientReady, c => {
 // 💬 PREFIXOS
 // ===============================================
 client.on(Events.MessageCreate, async message => {
-  if (message.author.bot || !message.guild) return;
+  if (!message.guild) return;
+
+  // Detectar mensagens do tipo "!p <query>" (geralmente originadas de outro bot)
+  // ⚠️ ESTE CHECK DEVE VENIR ANTES DO CHECK DE BOT!
+  try {
+    const m = message.content?.trim();
+    const match = m ? m.match(/^!p(?:\s+([\s\S]+))?/i) : null;
+    
+    if (match) {
+      console.log('[EXTERNAL !p] Detectado: content=', m, 'query=', match[1]);
+      const query = (match[1] || '').trim();
+
+      // Tentar identificar quem foi o usuário original: primeiro usuário mencionado na mensagem, senão autor
+      const mentioned = message.mentions?.users?.first();
+      const triggerUserId = mentioned ? mentioned.id : message.author.id;
+
+      // Reagir na mensagem original com um triste
+      try {
+        await message.react('😢');
+        console.log('[EXTERNAL !p] Reação adicionada com sucesso');
+      } catch (reactionErr) {
+        console.error('[EXTERNAL !p] Erro ao reagir:', reactionErr.message);
+      }
+
+      // Enviar embed triste com botão "Tudo bem"
+      const embed = createEmbed()
+        .setTitle('😢 Tem certeza?')
+        .setDescription(`<@${triggerUserId}>, tem certeza que vai usar esse bot ai??\nse lembre de mim!!`);
+
+      const btn = new ButtonBuilder()
+        .setCustomId('external_p_ok')
+        .setLabel('Tudo bem')
+        .setStyle(1);
+
+      const row = new ActionRowBuilder().addComponents(btn);
+
+      const sent = await message.channel.send({ embeds: [embed], components: [row] });
+      externalPMap.set(sent.id, { query, triggerUserId });
+      console.log('[EXTERNAL !p] Processado com sucesso: messageId=', sent.id);
+      return; // Sair após processar !p
+    }
+  } catch (e) {
+    console.error('[EXTERNAL !p] erro ao processar mensagem:', e);
+  }
+
+  // Ignorar mensagens de bot para execução de comandos normais
+  if (message.author.bot) return;
 
   lastTextChannel.set(message.guild.id, message.channel);
 
@@ -192,43 +245,7 @@ client.on(Events.InteractionCreate, async interaction => {
       );
     }
 
-    // Toggle loop button
-    if (interaction.isButton() && interaction.customId === 'loop_toggle') {
-      const guildId = interaction.guild.id;
-      const g = queueManager.get(guildId);
-
-      if (!g || !g.current) {
-        return interaction.reply({ content: '❌ Nenhuma música tocando.', ephemeral: true });
-      }
-
-      g.loop = !g.loop;
-
-      // Atualizar botão no embed agora tocando
-      try {
-        const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-        const loopBtn = new ButtonBuilder()
-          .setCustomId('loop_toggle')
-          .setLabel('Loop')
-          .setStyle(g.loop ? ButtonStyle.Success : ButtonStyle.Secondary)
-          .setEmoji('🔁');
-
-        const row = new ActionRowBuilder().addComponents(loopBtn);
-
-        if (g.nowPlayingMessage && !g.nowPlayingMessage.deleted) {
-          // Também atualiza o embed para refletir o novo estado de loop
-          try {
-            const newEmbed = createSongEmbed(g.current, 'playing', g.loop);
-            await g.nowPlayingMessage.edit({ embeds: [newEmbed], components: [row] }).catch(() => {});
-          } catch {
-            await g.nowPlayingMessage.edit({ components: [row] }).catch(() => {});
-          }
-        }
-      } catch (e) {
-        console.error('[INTERACTION] erro ao atualizar botão de loop:', e.message);
-      }
-
-      return interaction.reply({ content: g.loop ? '🔁 Loop ativado' : '⏹️ Loop desativado', ephemeral: true });
-    }
+    // loop button removed (using reaction toggle instead)
 
     if (interaction.isButton() && interaction.customId.startsWith('lib_delete_')) {
       const videoId = interaction.customId.replace('lib_delete_', '');
@@ -240,6 +257,48 @@ client.on(Events.InteractionCreate, async interaction => {
           : '❌ Música não encontrada.',
         ephemeral: true
       });
+    }
+
+    // Confirmação para mensagens externas "!p": pega a query armazenada e toca
+    if (interaction.isButton() && interaction.customId === 'external_p_ok') {
+      const mapping = externalPMap.get(interaction.message.id);
+      if (!mapping) {
+        return interaction.reply({ content: '❌ Pedido expirado ou inválido.', ephemeral: true });
+      }
+
+      if (mapping.triggerUserId && mapping.triggerUserId !== interaction.user.id) {
+        return interaction.reply({ content: `❌ Apenas <@${mapping.triggerUserId}> pode confirmar este pedido.`, ephemeral: true });
+      }
+
+      const query = (mapping.query || '').trim();
+      if (!query) return interaction.reply({ content: '❌ Query vazia.', ephemeral: true });
+
+      const vc = interaction.member?.voice?.channel;
+      if (!vc) return interaction.reply({ content: '❌ Entre em um canal de voz para eu tocar.', ephemeral: true });
+
+      if (resettingGuilds.has(interaction.guild.id)) {
+        return interaction.reply({ content: '⏳ Bot está se reorganizando.', ephemeral: true });
+      }
+
+      await interaction.reply({ content: '🔎 Resolvendo a query e adicionando à fila...', ephemeral: true });
+
+      try {
+        const resolved = await resolve(query);
+
+        if (!resolved || !resolved.videoId) {
+          return interaction.followUp({ content: '❌ Não consegui resolver a query.', ephemeral: true });
+        }
+
+        const song = { videoId: resolved.videoId, title: resolved.title, metadata: resolved.metadata };
+
+        // Remover mapping para evitar reuso
+        externalPMap.delete(interaction.message.id);
+
+        return queueManager.play(interaction.guild.id, vc, song, interaction.channel);
+      } catch (err) {
+        console.error('[EXTERNAL_P_OK] erro ao resolver/play:', err);
+        return interaction.followUp({ content: '❌ Erro ao processar a query.', ephemeral: true });
+      }
     }
 
   } catch (e) {
@@ -324,6 +383,77 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   } catch (e) {
     console.error('⚠️ Erro em VoiceStateUpdate:', e);
     if (oldState.guild) resettingGuilds.delete(oldState.guild.id);
+  }
+});
+
+// ===============================================
+// 🧾 REACTIONS (loop toggle via 🔁)
+// ===============================================
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  try {
+    if (user.bot) return;
+
+    if (reaction.partial) {
+      try { await reaction.fetch(); } catch { return; }
+    }
+
+    const message = reaction.message;
+    if (!message || !message.guild) return;
+
+    const guildId = message.guild.id;
+    const g = queueManager.get(guildId);
+    if (!g || !g.nowPlayingMessage) return;
+    if (message.id !== g.nowPlayingMessage.id) return;
+
+    // Loop toggle (🔁)
+    if (reaction.emoji.name === '🔁') {
+      g.loop = !g.loop;
+
+      try {
+        const newEmbed = createSongEmbed(g.current, 'playing', g.loop, g.autoDJ);
+        await g.nowPlayingMessage.edit({ embeds: [newEmbed] }).catch(() => {});
+      } catch {}
+
+      try { await reaction.users.remove(user.id); } catch {}
+
+      try {
+        const ch = g.textChannel || message.channel;
+        const feedback = await ch.send({ embeds: [createEmbed().setDescription(g.loop ? '🔁 Loop ativado' : '⏹️ Loop desativado')] });
+        setTimeout(() => feedback.delete().catch(() => {}), 2500);
+      } catch {}
+      return;
+    }
+
+    // Auto toggle (🎶)
+    if (reaction.emoji.name === '🎶') {
+      g.autoDJ = !g.autoDJ;
+
+      try {
+        const newEmbed = createSongEmbed(g.current, 'playing', g.loop, g.autoDJ);
+        await g.nowPlayingMessage.edit({ embeds: [newEmbed] }).catch(() => {});
+      } catch {}
+
+      try { await reaction.users.remove(user.id); } catch {}
+
+      try {
+        const ch = g.textChannel || message.channel;
+        const feedback = await ch.send({ embeds: [createEmbed().setDescription(g.autoDJ ? '🎶 Auto ativado' : '⏹️ Auto desativado')] });
+        setTimeout(() => feedback.delete().catch(() => {}), 2500);
+      } catch {}
+
+      // Se acabou de ativar, já adicionar 2 recomendações imediatas
+      if (g.autoDJ) {
+        try {
+          await queueManager.addAutoRecommendations(guildId, 2);
+        } catch (e) {
+          console.error('[AUTO] erro ao adicionar recomendações imediatas:', e);
+        }
+      }
+
+      return;
+    }
+  } catch (e) {
+    console.error('[REACTION] erro ao processar reação:', e);
   }
 });
 

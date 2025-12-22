@@ -152,4 +152,4 @@ async function resolve(query) {
   };
 }
 
-module.exports = { resolve };
+module.exports = { resolve, normalize, tokenize };

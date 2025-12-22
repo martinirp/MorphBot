@@ -5,10 +5,10 @@ async function execute(message) {
   const guildId = message.guild.id;
   const textChannel = message.channel;
 
-  const player = queueManager.getPlayer(guildId);
+  const g = queueManager.get(guildId);
 
   // validação simples e segura
-  if (!player) {
+  if (!g || !g.current) {
     return textChannel.send({
       embeds: [
         createEmbed()
@@ -18,7 +18,6 @@ async function execute(message) {
   }
 
   // título ANTES do skip (se existir)
-  const g = queueManager.guilds.get(guildId);
   const skippedTitle = g?.current?.title;
 
   // 🔥 delega totalmente ao QueueManager

@@ -13,7 +13,7 @@ async function execute(message, client) {
 
   // Agrupar comandos por categoria
   const categories = {
-    '🎵 Reprodução': ['play', 'queue', 'skip', 'clear', 'autodj'],
+    '🎵 Reprodução': ['play', 'queue', 'skip', 'clear'],
     '📚 Biblioteca': ['lib', 'mix', 'download'],
     '🛠️ Utilidades': ['stats', 'reload', 'volume', 'help']
   };

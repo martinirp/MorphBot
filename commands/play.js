@@ -56,7 +56,12 @@ async function execute(message) {
 
       const song = result.fromCache
         ? db.getByVideoId(result.videoId)
-        : { videoId: result.videoId, title: spotifyData.query };
+        : { videoId: result.videoId, title: spotifyData.query, metadata: { spotifyId: spotifyData.trackId } };
+
+      // Se veio do banco mas não tiver spotifyId, adicionamos para futuras recomendações
+      if (song && song.metadata && !song.metadata.spotifyId && spotifyData.trackId) {
+        song.metadata.spotifyId = spotifyData.trackId;
+      }
 
       await queueManager.play(
         guildId,
