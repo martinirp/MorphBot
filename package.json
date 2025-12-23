@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "node start.js",
-    "dev": "node start.js"
+    "dev": "node start.js",
+    "validate": "node scripts/validateCache.js",
+    "validate:fix": "node scripts/validateCache.js --fix"
   },
   "keywords": [
     "discord",
