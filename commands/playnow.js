@@ -104,10 +104,11 @@ async function execute(message) {
     if (isYoutubeLink(query)) {
       const video = await resolveVideo(query);
 
-      let song = db.getByVideoId(video.videoId) || {
-        videoId: video.videoId,
-        title: video.title
-      };
+      const dbSong = db.getByVideoId(video.videoId);
+      // Usar o título resolvido atual para evitar títulos antigos/limpos em excesso
+      let song = dbSong
+        ? { ...dbSong, title: video.title || dbSong.title }
+        : { videoId: video.videoId, title: video.title };
 
       await queueManager.playNow(
         guildId,

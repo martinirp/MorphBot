@@ -87,10 +87,11 @@ async function execute(message) {
       // 🎵 resolve e toca o vídeo imediatamente
       const video = await resolveVideo(query);
 
-      let song = db.getByVideoId(video.videoId) || {
-        videoId: video.videoId,
-        title: video.title
-      };
+      const dbSong = db.getByVideoId(video.videoId);
+      // Sempre preferir o título recém-resolvido (para não exibir versões antigas ou truncadas)
+      let song = dbSong
+        ? { ...dbSong, title: video.title || dbSong.title }
+        : { videoId: video.videoId, title: video.title };
 
       await queueManager.play(
         guildId,

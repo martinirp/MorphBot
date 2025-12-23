@@ -34,6 +34,18 @@ class QueueManager {
         }
       });
 
+      // Handler global para evitar crash em erros do player (ex.: ERR_STREAM_PREMATURE_CLOSE)
+      player.on('error', (err) => {
+        const code = err?.code || err?.name || 'player_error';
+        console.error(`[PLAYER][${guildId}] erro no AudioPlayer:`, code, err?.message || err);
+        // Tenta avançar para a próxima faixa se estivermos com estado montado
+        try {
+          this.next(guildId);
+        } catch (e) {
+          console.error(`[PLAYER][${guildId}] falha ao avançar após erro:`, e.message);
+        }
+      });
+
       this.guilds.set(guildId, {
         player,
         queue: [],
@@ -182,6 +194,13 @@ class QueueManager {
 
     g.current = song;
 
+    // Se não há videoId nem streamUrl, não há como tocar
+    if (!song.videoId && !song.streamUrl) {
+      console.error(`[PLAYER] ${guildId} → música sem videoId/streamUrl, pulando`);
+      this.next(guildId);
+      return;
+    }
+
     const { decodeHtml } = require('./embed');
     const titleForLog = song.title || song.metadata?.title || 'Música desconhecida';
     const cleanTitleLog = decodeHtml(titleForLog);
@@ -189,8 +208,13 @@ class QueueManager {
 
     let resource;
 
-    const absPath = path.resolve(song.file);
-    const hasCache = fs.existsSync(absPath) && isValidOggOpus(absPath);
+    // Garantir caminho do arquivo se tivermos videoId
+    if (!song.file && song.videoId) {
+      song.file = cachePath(song.videoId);
+    }
+
+    const absPath = song.file ? path.resolve(song.file) : null;
+    const hasCache = !!(absPath && fs.existsSync(absPath) && isValidOggOpus(absPath));
 
     if (hasCache) {
       // Cache hit válido: usa o arquivo direto para reduzir overhead
