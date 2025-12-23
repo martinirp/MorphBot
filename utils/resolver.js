@@ -1,6 +1,6 @@
 const db = require('./db');
 const { runYtDlp } = require('./ytDlp');
-const { searchYouTube, getVideoDetails } = require('./youtubeApi');
+const { searchYouTube, getVideoDetails, searchYouTubeMultiple } = require('./youtubeApi');
 
 // =========================
 // NORMALIZAÇÃO
@@ -99,9 +99,8 @@ async function resolve(query) {
 
   let videoId, title, metadata = null;
 
-  // Tentar YouTube API primeiro (muito mais rápido + metadados ricos)
+  // Tentar YouTube API primeiro (rápido) com fallback Piped
   const apiResult = await searchYouTube(query);
-  
   if (apiResult) {
     videoId = apiResult.videoId;
     title = apiResult.title;
@@ -119,37 +118,52 @@ async function resolve(query) {
     
     console.log(`[RESOLVER] YouTube API resolveu → ${videoId}`);
   } else {
-    // Fallback: yt-dlp com flags de otimização
-    console.log('[RESOLVER] YouTube API indisponível → fallback yt-dlp');
-    try {
-      const args = [
-        `ytsearch1:${query}`,
-        '--skip-download',
-        '--no-playlist',
-        '--no-warnings',
-        '--extractor-retries','1',
-        '--socket-timeout','5',
-        '--print','%(id)s|||%(title)s'
-      ];
-      const { stdout } = await runYtDlp(args);
-
-      if (!stdout) {
-        throw new Error('yt-dlp não retornou resultado');
+    // Tentar busca múltipla via API/Piped antes de chamar yt-dlp
+    const multi = await searchYouTubeMultiple(query, 3);
+    if (multi && multi.length) {
+      const top = multi[0];
+      videoId = top.videoId;
+      title = top.title;
+      metadata = { channel: top.channel, thumbnail: top.thumbnail };
+      
+      // Buscar detalhes se possível
+      const details = await getVideoDetails(videoId);
+      if (details) metadata = { ...metadata, ...details };
+      
+      console.log(`[RESOLVER] Fallback API/Piped resolveu → ${videoId}`);
+    } else {
+      // Fallback: yt-dlp com flags de otimização
+      console.log('[RESOLVER] API/Piped indisponível → fallback yt-dlp');
+      try {
+        const args = [
+          `ytsearch1:${query}`,
+          '--skip-download',
+          '--no-playlist',
+          '--no-warnings',
+          '--extractor-retries','1',
+          '--socket-timeout','5',
+          '--print','%(id)s|||%(title)s'
+        ];
+        const { stdout } = await runYtDlp(args);
+        
+        if (!stdout) {
+          throw new Error('yt-dlp não retornou resultado');
+        }
+        
+        const parts = stdout.trim().split('|||');
+        if (parts.length < 2) {
+          throw new Error('yt-dlp retornou formato inválido');
+        }
+        
+        videoId = parts[0].trim();
+        title = parts[1].trim();
+        metadata = { source: 'yt-dlp' };
+        
+        console.log(`[RESOLVER] yt-dlp resolveu → ${videoId} (${title})`);
+      } catch (ytdlpErr) {
+        console.error(`[RESOLVER] yt-dlp falhou: ${ytdlpErr.message}`);
+        throw ytdlpErr;
       }
-
-      const parts = stdout.trim().split('|||');
-      if (parts.length < 2) {
-        throw new Error('yt-dlp retornou formato inválido');
-      }
-
-      videoId = parts[0].trim();
-      title = parts[1].trim();
-      metadata = { source: 'yt-dlp' };
-
-      console.log(`[RESOLVER] yt-dlp resolveu → ${videoId} (${title})`);
-    } catch (ytdlpErr) {
-      console.error(`[RESOLVER] yt-dlp falhou: ${ytdlpErr.message}`);
-      throw ytdlpErr;
     }
   }
 

@@ -1,73 +1,37 @@
 const { createEmbed } = require('../utils/embed');
 
 async function execute(message, client) {
-  const commands = Array.from(client.commands.values());
-  
-  // Remover duplicatas (usar Map para garantir unicidade por nome)
-  const uniqueCommands = new Map();
-  for (const cmd of commands) {
-    if (!uniqueCommands.has(cmd.name)) {
-      uniqueCommands.set(cmd.name, cmd);
-    }
+  // Colete comandos atuais do client (já inclui aliases); filtramos por nome único
+  const unique = new Map();
+  for (const cmd of client.commands.values()) {
+    if (!cmd?.name) continue;
+    if (!unique.has(cmd.name)) unique.set(cmd.name, cmd);
   }
 
-  // Agrupar comandos por categoria
-  const categories = {
-    '🎵 Reprodução': ['play', 'queue', 'skip', 'clear'],
-    '📚 Biblioteca': ['lib', 'mix', 'download'],
-    '🛠️ Utilidades': ['stats', 'reload', 'volume', 'help']
-  };
+  // Monta linhas com apenas nome + descrição (instrução), conforme solicitado
+  const rows = Array.from(unique.values())
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(cmd => {
+      const desc = cmd.description || 'Sem descrição';
+      return `\`${cmd.name}\` — ${desc}`;
+    });
 
+  // Quebra em campos para respeitar limite de caracteres
   const embed = createEmbed()
     .setTitle('📖 Comandos Disponíveis')
     .setDescription('Use os prefixos: `#` `$` `%` `&` `/`');
 
-  // Adicionar comandos por categoria
-  for (const [category, commandNames] of Object.entries(categories)) {
-    const categoryCommands = commandNames
-      .map(name => uniqueCommands.get(name))
-      .filter(cmd => cmd) // Remover undefined
-      .map(cmd => {
-        const aliases = cmd.aliases && cmd.aliases.length > 0 
-          ? ` *(${cmd.aliases.slice(0, 2).join(', ')})*` // Limitar aliases
-          : '';
-        const description = cmd.description || 'Sem descrição';
-        
-        return `\`${cmd.name}${aliases}\` - ${description}`;
-      });
-
-    if (categoryCommands.length > 0) {
-      // Limitar a 1000 caracteres por campo
-      const fieldValue = categoryCommands.join('\n');
-      
-      if (fieldValue.length <= 1024) {
-        embed.addFields({
-          name: category,
-          value: fieldValue,
-          inline: false
-        });
-      } else {
-        // Dividir em múltiplos campos se necessário
-        const half = Math.ceil(categoryCommands.length / 2);
-        embed.addFields(
-          {
-            name: `${category} (1)`,
-            value: categoryCommands.slice(0, half).join('\n'),
-            inline: false
-          },
-          {
-            name: `${category} (2)`,
-            value: categoryCommands.slice(half).join('\n'),
-            inline: false
-          }
-        );
-      }
-    }
+  const chunkSize = 8; // mais compacta: 8 por campo
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    embed.addFields({
+      name: `Comandos (${i + 1}-${Math.min(i + chunkSize, rows.length)})`,
+      value: chunk.join('\n\n'),
+      inline: false
+    });
   }
 
-  embed.setFooter({ 
-    text: `Total: ${uniqueCommands.size} comandos` 
-  });
+  embed.setFooter({ text: `Total: ${unique.size} comandos` });
 
   return message.channel.send({ embeds: [embed] });
 }
@@ -75,7 +39,7 @@ async function execute(message, client) {
 module.exports = {
   name: 'help',
   aliases: ['ajuda', 'comandos', 'h'],
-  description: 'Mostra todos os comandos disponíveis organizados por categoria',
+  description: 'Mostra todos os comandos disponíveis',
   usage: '#help',
   execute
 };

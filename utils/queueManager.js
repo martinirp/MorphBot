@@ -13,9 +13,11 @@ const {
 const { createOpusStream, createOpusStreamFromUrl } = require('./stream');
 const { createEmbed, createSongEmbed } = require('./embed');
 const { resolve, tokenize } = require('./resolver');
+const path = require('path');
 const cachePath = require('./cachePath');
 const downloadQueue = require('./downloadQueue');
 const { getVideoDetails } = require('./youtubeApi');
+const { isValidOggOpus } = require('./validator');
 
 class QueueManager {
   constructor() {
@@ -124,10 +126,10 @@ class QueueManager {
       g.connection.subscribe(g.player);
     }
 
-    // Se estava tocando, pula para a próxima (que agora é a música que colocamos no topo)
+    // Não interromper a música atual: se já estiver tocando, apenas mantém na frente da fila
     if (wasPlaying) {
-      console.log(`[PLAYNOW] ${guildId} → pulando música atual para tocar ${song.title}`);
-      this.next(guildId);
+      console.log(`[PLAYNOW] ${guildId} → adicionada ao topo (não interrompe a atual)`);
+      return;
     } else {
       // Se não estava tocando, inicia playback
       console.log(`[PLAYNOW] ${guildId} → iniciando playback`);
@@ -186,9 +188,12 @@ class QueueManager {
 
     let resource;
 
-    if (fs.existsSync(song.file)) {
-      // Cache hit: usa o arquivo direto para reduzir overhead
-      resource = createAudioResource(song.file, { inputType: StreamType.OggOpus });
+    const absPath = path.resolve(song.file);
+    const hasCache = fs.existsSync(absPath) && isValidOggOpus(absPath);
+
+    if (hasCache) {
+      // Cache hit válido: usa o arquivo direto para reduzir overhead
+      resource = createAudioResource(absPath, { inputType: StreamType.OggOpus });
       g.currentStream = null;
     } else {
       // Usa streamUrl se presente (SoundCloud/Bandcamp/Direct), senão YouTube
@@ -227,16 +232,32 @@ class QueueManager {
       console.warn('[VOICE] conexão não ficou pronta em 3s; iniciando mesmo assim');
     }
 
+    // Se usando stream, aguardar buffer estratégico pronto ou timeout
+    if (!hasCache && g.currentStream && typeof g.currentStream.isBufferReady === 'function') {
+      try {
+        if (!g.currentStream.isBufferReady()) {
+          console.log('[STREAM] aguardando buffer estratégico...');
+          await new Promise(resolve => {
+            const start = Date.now();
+            const interval = setInterval(() => {
+              if (!g.currentStream) { clearInterval(interval); resolve(); return; }
+              if (g.currentStream.isBufferReady()) {
+                clearInterval(interval);
+                resolve();
+              } else if (Date.now() - start > 2000) { // timeout de segurança
+                clearInterval(interval);
+                resolve();
+              }
+            }, 50);
+          });
+        }
+      } catch {}
+    }
+
     g.player.play(resource);
 
     // Evitar múltiplos listeners acumulados
     g.player.removeAllListeners(AudioPlayerStatus.Idle);
-
-    // Sinaliza quando a reprodução realmente começou
-    let started = false;
-    g.player.once(AudioPlayerStatus.Playing, () => {
-      started = true;
-    });
 
     g.player.once(AudioPlayerStatus.Idle, () => {
       g.currentStream = null;
@@ -245,15 +266,13 @@ class QueueManager {
       this.next(guildId);
     });
 
-    // Fallback conservador: só avança se nunca começou a tocar
+    // Fallback para race conditions (ex.: recurso não dispara Idle)
     setTimeout(() => {
-      const status = g.player?.state?.status;
-      if (g.current === song && status === AudioPlayerStatus.Idle && !started) {
-        console.warn('[PLAYER] fallback: recurso permaneceu Idle sem iniciar; avançando…');
+      if (g.current === song && g.player?.state?.status === AudioPlayerStatus.Idle) {
         g.currentStream = null;
         this.next(guildId);
       }
-    }, 15000);
+    }, 5000);
 
     // Buscar metadados ricos se não tiver e enviar embed melhorado
     if (!song.metadata && song.videoId) {
@@ -510,7 +529,7 @@ class QueueManager {
         try {
           console.log('[AUTODJ] Fallback para YouTube...');
           const { searchYouTubeMultiple } = require('./youtubeApi');
-          const titleForSearch = currentTitle.replace(/\[.*?\]|\(.*?\)/g, '').trim();
+          const titleForSearch = this._cleanTitle(currentTitle);
           const sres = await searchYouTubeMultiple(titleForSearch, count * 4);
           if (sres && sres.length > 0) {
             const nonMusicKeywords = ['cooking', 'recipe', 'vlog', 'tutorial', 'howto', 'asmr', 'challenge', 'prank', 'reaction', 'gameplay'];
@@ -710,15 +729,32 @@ class QueueManager {
   // Helper: Limpar título de sufixos do YouTube
   _cleanTitle(title) {
     return title
+      // Normalizar travessões Unicode para hífen
+      .replace(/[–—]/g, ' - ')
+      // Substituir caractere de substituição (�) por hífen separador
+      .replace(/\uFFFD/g, ' - ')
+      // Remover indicadores de qualidade e formatos
       .replace(/\s*\(high\s+quality\)/gi, '')
       .replace(/\s*\[high\s+quality\]/gi, '')
+      .replace(/\s*[\[(](?:HD|4K|HQ)[\])]/gi, '')
+      // Remover "feat." em parênteses ou sufixo
+      .replace(/\s*\((?:feat\.|ft\.)[^)]*\)/gi, '')
+      .replace(/\s*-\s*(?:feat\.|ft\.)\s+.*$/gi, '')
+      // Remover marcadores de oficial/letra/áudio/visualizer
       .replace(/\s*\(official\s+[^)]*\)/gi, '')
       .replace(/\s*\[official\s+[^\]]*\]/gi, '')
+      .replace(/\s*\((?:official\s+music\s+video|lyric\s+video|lyrics|audio|visualizer)\)/gi, '')
+      .replace(/\s*\[(?:official\s+music\s+video|lyric\s+video|lyrics|audio|visualizer)\]/gi, '')
       .replace(/\s*\(\d{4}\s+remaster\)/gi, '')
       .replace(/\s*\[\d{4}\s+remaster\]/gi, '')
       .replace(/\s*\(remaster(?:ed)?\)/gi, '')
       .replace(/\s*\[remaster(?:ed)?\]/gi, '')
+      .replace(/\s*[-|–—]\s*(official(?:\s+music)?\s+video|lyric\s+video|lyrics|audio|visualizer|topic)(\s+video)?$/gi, '')
       .replace(/\s*-\s*(official|lyric|video|audio)(\s+video)?$/gi, '')
+      // Remover sufixos em PT-BR comuns
+      .replace(/\s*[-|–—]\s*(clipe\s+oficial|vídeo\s+oficial|ao\s+vivo|letra)$/gi, '')
+      // Remover separadores adicionais "| Canal"
+      .replace(/\s*\|\s*[^|]+$/gi, '')
       .replace(/\s+/g, ' ')
       .trim();
   }
@@ -756,7 +792,9 @@ class QueueManager {
     }
 
     // Opção 3: Tenta parsear do título (ex: "Artist - Track")
-    const parts = cleanedTitle.split(' - ');
+    // Tenta separar por diversos separadores comuns e também pelo caractere de substituição
+    const sepRegex = /\s*(?:-|–|—|:|\||•|\uFFFD)\s*/;
+    const parts = cleanedTitle.split(sepRegex);
     if (parts.length >= 2) {
       return {
         artist: parts[0].trim(),
