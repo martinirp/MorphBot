@@ -11,7 +11,9 @@
     "start": "node start.js",
     "dev": "node start.js",
     "validate": "node scripts/validateCache.js",
-    "validate:fix": "node scripts/validateCache.js --fix"
+    "validate:fix": "node scripts/validateCache.js --fix",
+    "reset": "node scripts/resetDatabase.js",
+    "reset:force": "node scripts/resetDatabase.js --force"
   },
   "keywords": [
     "discord",
