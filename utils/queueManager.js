@@ -59,9 +59,13 @@ class QueueManager {
 
     song.file = song.file || cachePath(song.videoId);
 
-    const wasPlaying = g.playing;
+    // Verificar o estado REAL do player, não apenas a flag
+    const playerStatus = g.player?.state?.status;
+    const isPlayerActive = playerStatus === AudioPlayerStatus.Playing || playerStatus === AudioPlayerStatus.Buffering;
+    const wasPlaying = g.playing && isPlayerActive;
+    
     const queueSize = g.queue.length;
-    console.log(`[QUEUE] ${guildId} → adicionando: ${song.title} (playing=${wasPlaying}, queue_size=${queueSize})`);
+    console.log(`[QUEUE] ${guildId} → adicionando: ${song.title} (playing=${wasPlaying}, playerStatus=${playerStatus}, queue_size=${queueSize})`);
     g.queue.push(song);
     console.log(`[QUEUE] ${guildId} → fila agora tem ${g.queue.length} músicas`);
 
@@ -85,6 +89,50 @@ class QueueManager {
       this.next(guildId);
     } else {
       console.log(`[QUEUE] ${guildId} → adicionado à fila (já estava tocando, não inicia playback)`);
+    }
+  }
+
+  async playNow(guildId, voiceChannel, song, textChannel) {
+    const g = this.get(guildId);
+
+    if (textChannel) g.textChannel = textChannel;
+    g.voiceChannel = voiceChannel;
+
+    song.file = song.file || cachePath(song.videoId);
+
+    // Verificar o estado REAL do player, não apenas a flag
+    const playerStatus = g.player?.state?.status;
+    const isPlayerActive = playerStatus === AudioPlayerStatus.Playing || playerStatus === AudioPlayerStatus.Buffering;
+    const wasPlaying = g.playing && isPlayerActive;
+    const currentSong = g.current;
+    console.log(`[PLAYNOW] ${guildId} → colocando no topo: ${song.title} (playing=${wasPlaying}, playerStatus=${playerStatus})`);
+
+    // Coloca a música no TOPO da fila usando unshift
+    g.queue.unshift(song);
+    console.log(`[PLAYNOW] ${guildId} → fila agora tem ${g.queue.length} músicas`);
+
+    if (!fs.existsSync(song.file)) {
+      downloadQueue.enqueue(guildId, song);
+    }
+
+    if (!g.connection) {
+      g.connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId,
+        adapterCreator: voiceChannel.guild.voiceAdapterCreator
+      });
+      g.connection.subscribe(g.player);
+    }
+
+    // Se estava tocando, pula para a próxima (que agora é a música que colocamos no topo)
+    if (wasPlaying) {
+      console.log(`[PLAYNOW] ${guildId} → pulando música atual para tocar ${song.title}`);
+      this.next(guildId);
+    } else {
+      // Se não estava tocando, inicia playback
+      console.log(`[PLAYNOW] ${guildId} → iniciando playback`);
+      g.playing = true;
+      this.next(guildId);
     }
   }
 
