@@ -232,6 +232,12 @@ class QueueManager {
     // Evitar múltiplos listeners acumulados
     g.player.removeAllListeners(AudioPlayerStatus.Idle);
 
+    // Sinaliza quando a reprodução realmente começou
+    let started = false;
+    g.player.once(AudioPlayerStatus.Playing, () => {
+      started = true;
+    });
+
     g.player.once(AudioPlayerStatus.Idle, () => {
       g.currentStream = null;
       // Limpar contador de falhas ao tocar com sucesso
@@ -239,13 +245,15 @@ class QueueManager {
       this.next(guildId);
     });
 
-    // Fallback para race conditions (ex.: recurso não dispara Idle)
+    // Fallback conservador: só avança se nunca começou a tocar
     setTimeout(() => {
-      if (g.current === song && g.player?.state?.status === AudioPlayerStatus.Idle) {
+      const status = g.player?.state?.status;
+      if (g.current === song && status === AudioPlayerStatus.Idle && !started) {
+        console.warn('[PLAYER] fallback: recurso permaneceu Idle sem iniciar; avançando…');
         g.currentStream = null;
         this.next(guildId);
       }
-    }, 5000);
+    }, 15000);
 
     // Buscar metadados ricos se não tiver e enviar embed melhorado
     if (!song.metadata && song.videoId) {
