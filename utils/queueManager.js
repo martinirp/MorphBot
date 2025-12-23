@@ -183,7 +183,8 @@ class QueueManager {
     g.current = song;
 
     const { decodeHtml } = require('./embed');
-    const cleanTitleLog = decodeHtml(song.title || '');
+    const titleForLog = song.title || song.metadata?.title || 'Música desconhecida';
+    const cleanTitleLog = decodeHtml(titleForLog);
     console.log(`[PLAYER] ${guildId} → tocando agora: ${cleanTitleLog}`);
 
     let resource;
@@ -282,7 +283,12 @@ class QueueManager {
       }
     }
 
-    const songData = song.metadata ? { ...song, ...song.metadata } : song;
+    // Garantir que o songData sempre tem título
+    const songData = {
+      ...song,
+      ...(song.metadata || {}),
+      title: song.title || song.metadata?.title || 'Música desconhecida'
+    };
 
     try {
       const loopOn = !!g.loop;
