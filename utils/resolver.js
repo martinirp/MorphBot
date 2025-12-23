@@ -1,7 +1,5 @@
 const db = require('./db');
-const { exec } = require('child_process');
-const util = require('util');
-const execPromise = util.promisify(exec);
+const { runYtDlp } = require('./ytDlp');
 const { searchYouTube, getVideoDetails } = require('./youtubeApi');
 
 // =========================
@@ -124,9 +122,16 @@ async function resolve(query) {
     // Fallback: yt-dlp com flags de otimização
     console.log('[RESOLVER] YouTube API indisponível → fallback yt-dlp');
     try {
-      const { stdout } = await execPromise(
-        `yt-dlp "ytsearch1:${query}" --skip-download --no-playlist --no-warnings --extractor-retries 1 --socket-timeout 5 --print "%(id)s|||%(title)s"`
-      );
+      const args = [
+        `ytsearch1:${query}`,
+        '--skip-download',
+        '--no-playlist',
+        '--no-warnings',
+        '--extractor-retries','1',
+        '--socket-timeout','5',
+        '--print','%(id)s|||%(title)s'
+      ];
+      const { stdout } = await runYtDlp(args);
 
       if (!stdout) {
         throw new Error('yt-dlp não retornou resultado');

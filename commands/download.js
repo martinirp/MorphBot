@@ -1,5 +1,4 @@
-const { exec } = require('child_process');
-const util = require('util');
+const { runYtDlp } = require('../utils/ytDlp');
 const fs = require('fs');
 const path = require('path');
 
@@ -7,7 +6,7 @@ const { createEmbed } = require('../utils/embed');
 const { searchMultiple } = require('../utils/dibuiador');
 const { getVideoDetails } = require('../utils/youtubeApi');
 
-const execPromise = util.promisify(exec);
+// usando wrapper seguro para yt-dlp
 
 // =========================
 // HELPERS
@@ -123,9 +122,8 @@ module.exports = {
       // =========================
       // yt-dlp → MP3
       // =========================
-      const { stdout } = await execPromise(
-        `yt-dlp -x --audio-format mp3 --no-playlist -o "${filePath}" https://www.youtube.com/watch?v=${chosenVideoId}`
-      );
+      const args = ['-x','--audio-format','mp3','--no-playlist','-o', filePath, `https://www.youtube.com/watch?v=${chosenVideoId}`];
+      const { stdout } = await runYtDlp(args);
 
       let title = chosenTitle || 'audio';
       const match = stdout.match(/Destination:\s(.+)\.mp3/);

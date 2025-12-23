@@ -132,16 +132,15 @@ async function execute(message) {
     const sourceType = detectSourceType(query);
     
     if (sourceType !== 'search' && sourceType !== 'youtube') {
-      const { exec } = require('child_process');
-      const util = require('util');
-      const execP = util.promisify(exec);
+      const { runYtDlpJson } = require('../utils/ytDlp');
 
       let video;
       try {
-        const { stdout } = await execP(
-          `yt-dlp --dump-json --no-playlist "${query}"`
-        );
-        const data = JSON.parse(stdout);
+        const data = await runYtDlpJson([
+          '--dump-json',
+          '--no-playlist',
+          query
+        ]);
         video = {
           videoId: data.id || require('crypto').createHash('md5').update(query).digest('hex'),
           title: data.title || 'Áudio externo',

@@ -40,15 +40,13 @@ function detectSourceType(input) {
 }
 
 async function resolveVideo(url) {
-  const { exec } = require('child_process');
-  const util = require('util');
-  const execP = util.promisify(exec);
+  const { runYtDlpJson } = require('./ytDlp');
 
-  const { stdout } = await execP(
-    `yt-dlp --dump-json --no-playlist "${url}"`
-  );
-
-  const data = JSON.parse(stdout);
+  const data = await runYtDlpJson([
+    '--dump-json',
+    '--no-playlist',
+    url
+  ]);
 
   return {
     videoId: data.id,
