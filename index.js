@@ -28,6 +28,7 @@ const { createEmbed, createSongEmbed } = require('./utils/embed');
 const { resolve } = require('./utils/resolver');
 const { ActionRowBuilder, ButtonBuilder } = require('discord.js');
 const { removeSongCompletely } = require('./utils/removeSong');
+const { startCacheMonitor } = require('./utils/cacheMonitor');
 
 // ===============================================
 // 💬 Último canal de texto por guild
@@ -89,6 +90,10 @@ console.log(`✅ Comandos carregados: ${client.commands.size}`);
 // ===============================================
 client.once(Events.ClientReady, c => {
   console.log(`✅ Bot online como ${c.user.tag}`);
+  // iniciar monitor de cache assíncrono (não bloqueante)
+  try { startCacheMonitor(); } catch (e) {
+    console.error('[CACHE MONITOR] erro ao iniciar:', e.message);
+  }
 });
 
 // ===============================================
