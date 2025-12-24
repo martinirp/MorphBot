@@ -60,46 +60,35 @@ async function execute(message) {
 
   // 📜 próximas músicas
   if (g.queue.length > 0) {
-    // Buscar durações das músicas da fila (em paralelo, até 10)
     const queueSlice = g.queue.slice(0, 10);
-    
-    const durationsPromises = queueSlice.map(async song => {
-      if (song.duration) return song.duration;
-      if (song.metadata?.duration) return song.metadata.duration;
-      
-      // Buscar duração via API se não tiver
-      if (song.videoId) {
-        const details = await getVideoDetails(song.videoId).catch(() => null);
-        if (details?.duration) {
-          song.duration = details.duration;
-          return details.duration;
-        }
-      }
-      return null;
-    });
 
-    const durations = await Promise.all(durationsPromises);
-    
-    // Calcular tempo acumulado
-    let accumulatedSeconds = 0;
-    
-    const list = queueSlice.map((s, i) => {
-      const duration = durations[i];
-      const durationSeconds = durationToSeconds(duration);
-      
-      const timeUntil = accumulatedSeconds > 0 ? ` • Em ${secondsToDuration(accumulatedSeconds)}` : '';
-      const durationDisplay = duration ? ` [${duration}]` : '';
-      
-      accumulatedSeconds += durationSeconds;
-      
-      return `${i + 1}. ${s.title}${durationDisplay}${timeUntil}`;
-    }).join('\n');
+    // Primeiro envio rápido com durações já conhecidas (sem bloquear na API)
+    const initialDurations = queueSlice.map(s => s.duration || s.metadata?.duration || null);
 
-    const totalDuration = accumulatedSeconds > 0 ? ` • Tempo total: ${secondsToDuration(accumulatedSeconds)}` : '';
+    const buildList = (durations) => {
+      let accumulatedSeconds = 0;
+      const list = queueSlice.map((s, i) => {
+        const duration = durations[i];
+        const durationSeconds = durationToSeconds(duration);
+
+        const timeUntil = accumulatedSeconds > 0 ? ` • Em ${secondsToDuration(accumulatedSeconds)}` : '';
+        const durationDisplay = duration ? ` [${duration}]` : '';
+
+        accumulatedSeconds += durationSeconds;
+
+        return `${i + 1}. ${s.title}${durationDisplay}${timeUntil}`;
+      }).join('\n');
+
+      const totalDuration = accumulatedSeconds > 0 ? ` • Tempo total: ${secondsToDuration(accumulatedSeconds)}` : '';
+
+      return { list, totalDuration };
+    };
+
+    const initial = buildList(initialDurations);
 
     embed.addFields({
-      name: `📜 Próximas músicas${totalDuration}`,
-      value: list
+      name: `📜 Próximas músicas${initial.totalDuration}`,
+      value: initial.list
     });
 
     if (g.queue.length > 10) {
@@ -109,7 +98,73 @@ async function execute(message) {
     }
   }
 
-  return textChannel.send({ embeds: [embed] });
+  const sent = await textChannel.send({ embeds: [embed] });
+
+  // Atualiza durations em background (assíncrono) e edita o embed quando disponível
+  if (g && g.queue.length > 0) {
+    (async () => {
+      try {
+        const queueSlice = g.queue.slice(0, 10);
+        const durations = await Promise.all(queueSlice.map(async song => {
+          if (song.duration) return song.duration;
+          if (song.metadata?.duration) return song.metadata.duration;
+          if (song.videoId) {
+            const details = await getVideoDetails(song.videoId).catch(() => null);
+            if (details?.duration) {
+              song.duration = details.duration;
+              return details.duration;
+            }
+          }
+          return null;
+        }));
+
+        // Se nada novo, não edita
+        if (!durations.some(Boolean)) return;
+
+        let accumulatedSeconds = 0;
+        const list = queueSlice.map((s, i) => {
+          const duration = durations[i];
+          const durationSeconds = durationToSeconds(duration);
+
+          const timeUntil = accumulatedSeconds > 0 ? ` • Em ${secondsToDuration(accumulatedSeconds)}` : '';
+          const durationDisplay = duration ? ` [${duration}]` : '';
+
+          accumulatedSeconds += durationSeconds;
+
+          return `${i + 1}. ${s.title}${durationDisplay}${timeUntil}`;
+        }).join('\n');
+
+        const totalDuration = accumulatedSeconds > 0 ? ` • Tempo total: ${secondsToDuration(accumulatedSeconds)}` : '';
+
+        const updatedEmbed = createEmbed()
+          .setTitle('🎶 Fila de reprodução');
+
+        if (g.playing && g.current) {
+          updatedEmbed.addFields({
+            name: '🎵 Tocando agora',
+            value: `**${g.current.title}**`
+          });
+        }
+
+        updatedEmbed.addFields({
+          name: `📜 Próximas músicas${totalDuration}`,
+          value: list
+        });
+
+        if (g.queue.length > 10) {
+          updatedEmbed.setFooter({
+            text: `+ ${g.queue.length - 10} música(s) na fila`
+          });
+        }
+
+        await sent.edit({ embeds: [updatedEmbed] });
+      } catch (e) {
+        // Se falhar, apenas ignora para não travar o comando
+      }
+    })();
+  }
+
+  return sent;
 }
 
 module.exports = {

@@ -14,6 +14,38 @@ global.botInstance = true;
 // ===============================================
 require('dotenv').config();
 
+// Validar OPUS_BITRATE_K
+const opusBitrate = parseInt(process.env.OPUS_BITRATE_K || '96', 10);
+if (isNaN(opusBitrate) || opusBitrate < 16 || opusBitrate > 512) {
+  console.warn(`⚠️  OPUS_BITRATE_K inválido (${process.env.OPUS_BITRATE_K}), usando padrão 96kbps`);
+}
+
+if (process.env.DEBUG_MODE === 'true') {
+  console.log('🐛 DEBUG_MODE ativado: logs verbosos habilitados');
+}
+
+// ===============================================
+// 🛡️ GLOBAL ERROR GUARDS
+// ===============================================
+process.on('uncaughtException', (err) => {
+  const msg = err?.message || '';
+  const code = err?.code || '';
+  if (code === 'ERR_STREAM_PREMATURE_CLOSE' || /premature/i.test(msg) || /write EOF/i.test(msg) || code === 'EOF') {
+    console.warn('[GLOBAL] Ignorando fechamento prematuro de stream:', msg);
+    return;
+  }
+  console.error('[GLOBAL] Uncaught exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const msg = (reason && reason.message) ? reason.message : String(reason);
+  if (/premature/i.test(msg) || /write EOF/i.test(msg)) {
+    console.warn('[GLOBAL] Ignorando rejeição por fechamento prematuro:', msg);
+    return;
+  }
+  console.error('[GLOBAL] Unhandled rejection:', reason);
+});
+
 // ===============================================
 // 🤖 IMPORTS
 // ===============================================

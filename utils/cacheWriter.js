@@ -70,6 +70,7 @@ function writeCache(videoId, title, stream, onFinish, streamUrl = null) {
 
     // move .part → final para evitar cache corrompido
     try {
+      console.log(`[CACHE] renomeando .part → final: ${tempFile} -> ${file}`);
       fs.renameSync(tempFile, file);
     } catch (err) {
       console.error('[CACHE] erro ao renomear arquivo:', err);

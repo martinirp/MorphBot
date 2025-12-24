@@ -11,6 +11,7 @@ const {
 } = require('@discordjs/voice');
 
 const { createOpusStream, createOpusStreamFromUrl } = require('./stream');
+const { createOpusTailStream } = require('./fileTailStream');
 const { createEmbed, createSongEmbed } = require('./embed');
 const { resolve, tokenize } = require('./resolver');
 const path = require('path');
@@ -37,7 +38,14 @@ class QueueManager {
       // Handler global para evitar crash em erros do player (ex.: ERR_STREAM_PREMATURE_CLOSE)
       player.on('error', (err) => {
         const code = err?.code || err?.name || 'player_error';
-        console.error(`[PLAYER][${guildId}] erro no AudioPlayer:`, code, err?.message || err);
+        const msg = err?.message || '';
+        // Ignorar completamente "premature close" - deixar Idle handler cuidar
+        if (code === 'ERR_STREAM_PREMATURE_CLOSE' || /premature/i.test(msg)) {
+          console.warn(`[PLAYER][${guildId}] aviso: fechamento prematuro (ignorado)`);
+          return; // NÃO avançar
+        }
+        // Erros críticos reais
+        console.error(`[PLAYER][${guildId}] erro crítico:`, code, msg || err);
         // Tenta avançar para a próxima faixa se estivermos com estado montado
         try {
           this.next(guildId);
@@ -214,38 +222,70 @@ class QueueManager {
     }
 
     const absPath = song.file ? path.resolve(song.file) : null;
+    const partPath = song.file ? path.resolve(`${song.file}.part`) : null;
     const hasCache = !!(absPath && fs.existsSync(absPath) && isValidOggOpus(absPath));
+    const hasPart = !!(partPath && fs.existsSync(partPath) && isValidOggOpus(partPath));
 
     if (hasCache) {
+      console.log(`[PLAYBACK][${guildId}] src=cache file=${absPath}`);
       // Cache hit válido: usa o arquivo direto para reduzir overhead
       resource = createAudioResource(absPath, { inputType: StreamType.OggOpus });
       g.currentStream = null;
+    } else if (hasPart) {
+      console.log(`[PLAYBACK][${guildId}] src=tail (part exists) part=${partPath} → final=${absPath}`);
+      // Tocar do arquivo parcial, seguindo crescimento e alternando para o final ao concluir
+      const tail = createOpusTailStream(absPath);
+      tail.on('error', err => {
+        console.warn('[TAIL] aviso:', err?.message || err);
+      });
+      g.currentStream = tail;
+      resource = createAudioResource(tail, { inputType: StreamType.OggOpus, inlineVolume: false });
     } else {
-      // Usa streamUrl se presente (SoundCloud/Bandcamp/Direct), senão YouTube
-      const stream = song.streamUrl 
-        ? createOpusStreamFromUrl(song.streamUrl)
-        : createOpusStream(song.videoId);
+      // Preferir tocar do arquivo parcial; aguardar curto período para .part aparecer
+      console.log(`[PLAYBACK][${guildId}] src=await_part: aguardando .part por até 800ms...`);
+      let usedTail = false;
+      if (partPath) {
+        const startWait = Date.now();
+        while (!fs.existsSync(partPath) && (Date.now() - startWait) < 800) {
+          await new Promise(r => setTimeout(r, 100));
+        }
+        if (fs.existsSync(partPath)) {
+          console.log(`[PLAYBACK][${guildId}] src=tail (part exists, header gated) part=${partPath}`);
+          const tail = createOpusTailStream(absPath);
+          tail.on('error', err => {
+            console.warn('[TAIL] aviso:', err?.message || err);
+          });
+          g.currentStream = tail;
+          resource = createAudioResource(tail, { inputType: StreamType.OggOpus, inlineVolume: false });
+          usedTail = true;
+        }
+      }
+      if (!usedTail) {
+        // Fallback: stream direto (tocando enquanto baixa em paralelo)
+        console.log(`[PLAYBACK][${guildId}] src=stream (sem .part)`);
+        const stream = song.streamUrl 
+          ? createOpusStreamFromUrl(song.streamUrl)
+          : createOpusStream(song.videoId);
 
       stream.on('error', err => {
-        if (err.code !== 'EPIPE') {
-          console.error('[STREAM] erro:', err);
+        const code = err?.code || '';
+        const msg = err?.message || '';
+        if (code === 'EPIPE' || code === 'EOF' || /premature/i.test(msg)) {
+          console.warn('[STREAM] aviso (não crítico):', msg || code);
+          g.currentStream = null;
+          return;
         }
+        console.error('[STREAM] erro crítico:', err);
         g.currentStream = null;
-        
-        // Incrementar contador de falhas
         if (!g.failedAttempts) g.failedAttempts = new Map();
         const attempts = g.failedAttempts.get(song.videoId) || 0;
         g.failedAttempts.set(song.videoId, attempts + 1);
-        
         this.next(guildId);
       });
 
-      g.currentStream = stream;
-
-      resource = createAudioResource(stream, {
-        inputType: StreamType.OggOpus,
-        inlineVolume: false
-      });
+        g.currentStream = stream;
+        resource = createAudioResource(stream, { inputType: StreamType.OggOpus, inlineVolume: false });
+      }
     }
 
     // Garantir conexão pronta antes de tocar (reduz silêncio inicial)
@@ -257,28 +297,7 @@ class QueueManager {
       console.warn('[VOICE] conexão não ficou pronta em 3s; iniciando mesmo assim');
     }
 
-    // Se usando stream, aguardar buffer estratégico pronto ou timeout
-    if (!hasCache && g.currentStream && typeof g.currentStream.isBufferReady === 'function') {
-      try {
-        if (!g.currentStream.isBufferReady()) {
-          console.log('[STREAM] aguardando buffer estratégico...');
-          await new Promise(resolve => {
-            const start = Date.now();
-            const interval = setInterval(() => {
-              if (!g.currentStream) { clearInterval(interval); resolve(); return; }
-              if (g.currentStream.isBufferReady()) {
-                clearInterval(interval);
-                resolve();
-              } else if (Date.now() - start > 2000) { // timeout de segurança
-                clearInterval(interval);
-                resolve();
-              }
-            }, 50);
-          });
-        }
-      } catch {}
-    }
-
+    console.log(`[PLAYBACK][${guildId}] player.play(inputType=OggOpus)`);
     g.player.play(resource);
 
     // Evitar múltiplos listeners acumulados
@@ -291,24 +310,8 @@ class QueueManager {
       this.next(guildId);
     });
 
-    // Fallback para race conditions (ex.: recurso não dispara Idle)
-    setTimeout(() => {
-      if (g.current === song && g.player?.state?.status === AudioPlayerStatus.Idle) {
-        g.currentStream = null;
-        this.next(guildId);
-      }
-    }, 5000);
-
-    // Buscar metadados ricos se não tiver e enviar embed melhorado
-    if (!song.metadata && song.videoId) {
-      const details = await getVideoDetails(song.videoId);
-      if (details) {
-        song.metadata = details;
-      }
-    }
-
-    // Garantir que o songData sempre tem título
-    const songData = {
+    // Garantir que o songData sempre tem título (envio imediato do embed)
+    const baseSongData = {
       ...song,
       ...(song.metadata || {}),
       title: song.title || song.metadata?.title || 'Música desconhecida'
@@ -323,19 +326,41 @@ class QueueManager {
       if (g.loop && g.current && g.nowPlayingMessage) {
         try {
           const existing = g.nowPlayingMessage;
-          const newEmbed = createSongEmbed(songData, 'playing', loopOn, autoOn);
+          const newEmbed = createSongEmbed(baseSongData, 'playing', loopOn, autoOn);
           await existing.edit({ embeds: [newEmbed] }).catch(() => {});
         } catch (err) {
           // se falhar ao editar, ignoramos silenciosamente
         }
       } else {
-        const sent = await g.textChannel?.send({ embeds: [createSongEmbed(songData, 'playing', loopOn, autoOn)] });
+        const sent = await g.textChannel?.send({ embeds: [createSongEmbed(baseSongData, 'playing', loopOn, autoOn)] });
 
         if (sent) {
           g.nowPlayingMessage = sent;
           try { await sent.react('🔁'); } catch {}
           try { await sent.react('🎶'); } catch {}
         }
+      }
+
+      // Buscar metadados ricos em background e atualizar embed assim que disponível
+      const needsMetadata = !song.metadata || !song.metadata.duration || !song.metadata.views;
+      if (needsMetadata && song.videoId) {
+        (async () => {
+          try {
+            const details = await getVideoDetails(song.videoId);
+            if (details) {
+              song.metadata = details;
+              const updatedData = {
+                ...song,
+                ...(song.metadata || {}),
+                title: song.title || song.metadata?.title || 'Música desconhecida'
+              };
+              const loopOnRef = !!g.loop;
+              const autoOnRef = !!g.autoDJ;
+              const newEmbed = createSongEmbed(updatedData, 'playing', loopOnRef, autoOnRef);
+              try { await g.nowPlayingMessage?.edit({ embeds: [newEmbed] }); } catch {}
+            }
+          } catch {}
+        })();
       }
 
       // 🎵 AUTO-RECOMENDAÇÕES LAST.FM (se autoDJ estiver ativado, adiciona 2 músicas automaticamente)
@@ -349,7 +374,7 @@ class QueueManager {
       }
     } catch (e) {
       // Falha em enviar embed não é crítico
-      try { g.textChannel?.send({ embeds: [createSongEmbed(songData, 'playing', false, false)] }); } catch {}
+      try { g.textChannel?.send({ embeds: [createSongEmbed(baseSongData, 'playing', false, false)] }); } catch {}
     }
 
     // 🟢 Prefetch próxima música se existir na fila
@@ -510,84 +535,15 @@ class QueueManager {
         console.log('[AUTODJ] ⚠️ LASTFM_API_KEY não configurada');
       }
 
-      // Step 2: Fallback para Spotify
       if (recommendations.length === 0) {
-        const spotifyId = g.current.metadata?.spotifyId;
-        if (spotifyId && process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET) {
-          try {
-            console.log('[AUTODJ] Fallback para Spotify...');
-            const token = await this._getSpotifyToken();
-            const recRes = await require('axios').get('https://api.spotify.com/v1/recommendations', {
-              headers: { Authorization: `Bearer ${token}` },
-              params: { seed_tracks: spotifyId, limit: count * 3 }
-            });
-            if (recRes.data.tracks) {
-              recommendations = recRes.data.tracks.map(t => ({
-                source: 'spotify',
-                title: `${t.artists.map(a => a.name).join(', ')} - ${t.name}`,
-                duration: Math.round(t.duration_ms / 1000)
-              }));
-              console.log(`[AUTODJ] ✅ Spotify retornou ${recommendations.length} recomendações`);
-            }
-          } catch (spErr) {
-            console.error('[AUTODJ] Spotify error:', spErr.message);
-          }
-        }
-      }
-
-      // Step 3: Fallback para Gemini
-      if (recommendations.length === 0) {
-        if (process.env.GEMINI_API_KEY) {
-          try {
-            console.log('[AUTODJ] Fallback para Gemini...');
-            const geminiRecs = await this._getRecommendationsFromGemini(currentTitle, count * 3);
-            if (geminiRecs && geminiRecs.length > 0) {
-              recommendations = geminiRecs.map(r => ({
-                source: 'gemini',
-                title: r
-              }));
-              console.log(`[AUTODJ] ✅ Gemini retornou ${recommendations.length} recomendações`);
-            }
-          } catch (geminiErr) {
-            console.error('[AUTODJ] Gemini error:', geminiErr.message);
-          }
-        }
-      }
-
-      // Step 4: Fallback para YouTube
-      if (recommendations.length === 0) {
-        try {
-          console.log('[AUTODJ] Fallback para YouTube...');
-          const { searchYouTubeMultiple } = require('./youtubeApi');
-          const titleForSearch = this._cleanTitle(currentTitle);
-          const sres = await searchYouTubeMultiple(titleForSearch, count * 4);
-          if (sres && sres.length > 0) {
-            const nonMusicKeywords = ['cooking', 'recipe', 'vlog', 'tutorial', 'howto', 'asmr', 'challenge', 'prank', 'reaction', 'gameplay'];
-            recommendations = sres
-              .filter(r => r.videoId !== g.current.videoId)
-              .filter(r => !nonMusicKeywords.some(kw => r.title.toLowerCase().includes(kw)))
-              .map(r => ({
-                source: 'youtube',
-                title: r.title,
-                duration: r.duration,
-                videoId: r.videoId
-              }));
-            console.log(`[AUTODJ] ✅ YouTube retornou ${recommendations.length} recomendações`);
-          }
-        } catch (ytErr) {
-          console.error('[AUTODJ] YouTube error:', ytErr.message);
-        }
-      }
-
-      if (recommendations.length === 0) {
-        console.log('[AUTODJ] Nenhuma recomendação encontrada');
+        console.log('[AUTODJ] Nenhuma recomendação encontrada no Last.FM');
         return 0;
       }
 
-      // Step 5: Apply filters and deduplication
+      // Apply filters and deduplication
       const stopwords = ['cover', 'live', 'stripped', 'acoustic', 'remix', 'karaoke', 'instrumental', 'solo'];
       const durationTolerance = 30;
-      const primaryDuration = g.current.metadata?.duration || 0;
+      const primaryDuration = g.current?.metadata?.duration || 0;
       const minTokenOverlap = 1;
 
       let added = 0;
@@ -596,6 +552,12 @@ class QueueManager {
 
         const recArtist = (rec.title.split(' - ')[0] || '').trim().toLowerCase();
         const recTokens = tokenize(rec.title || '');
+        const currentTitleClean = this._cleanTitle(currentTitle).toLowerCase();
+        const recTitleClean = this._cleanTitle(rec.title || '').toLowerCase();
+        if (recTitleClean === currentTitleClean) {
+          console.log('[AUTODJ FILTER] REJEITADO: título igual ao atual');
+          continue;
+        }
 
         // Evitar repetir artista: no máximo 1 por artista
         if (recArtist) {
@@ -763,24 +725,10 @@ class QueueManager {
       .replace(/[–—]/g, ' - ')
       // Substituir caractere de substituição (�) por hífen separador
       .replace(/\uFFFD/g, ' - ')
-      // Remover indicadores de qualidade e formatos
-      .replace(/\s*\(high\s+quality\)/gi, '')
-      .replace(/\s*\[high\s+quality\]/gi, '')
-      .replace(/\s*[\[(](?:HD|4K|HQ)[\])]/gi, '')
-      // Remover "feat." em parênteses ou sufixo
-      .replace(/\s*\((?:feat\.|ft\.)[^)]*\)/gi, '')
-      .replace(/\s*-\s*(?:feat\.|ft\.)\s+.*$/gi, '')
-      // Remover marcadores de oficial/letra/áudio/visualizer
-      .replace(/\s*\(official\s+[^)]*\)/gi, '')
-      .replace(/\s*\[official\s+[^\]]*\]/gi, '')
-      .replace(/\s*\((?:official\s+music\s+video|lyric\s+video|lyrics|audio|visualizer)\)/gi, '')
-      .replace(/\s*\[(?:official\s+music\s+video|lyric\s+video|lyrics|audio|visualizer)\]/gi, '')
-      .replace(/\s*\(\d{4}\s+remaster\)/gi, '')
-      .replace(/\s*\[\d{4}\s+remaster\]/gi, '')
-      .replace(/\s*\(remaster(?:ed)?\)/gi, '')
-      .replace(/\s*\[remaster(?:ed)?\]/gi, '')
-      .replace(/\s*[-|–—]\s*(official(?:\s+music)?\s+video|lyric\s+video|lyrics|audio|visualizer|topic)(\s+video)?$/gi, '')
-      .replace(/\s*-\s*(official|lyric|video|audio)(\s+video)?$/gi, '')
+      // Remover parênteses/colchetes completos com tags indesejadas
+      .replace(/[\[\(]\s*(?:official\s*(?:music\s*)?(?:video|audio|visualizer|lyric\s*video)|official\s+visualizer|4k|8k|(?:hq|hd|high\s*quality)|remaster(?:ed|ize[ds])?|ft\.?\s*[^\]\)]+|(?:with\s*)?lyrics|music\s*video|mv|live\s*(?:performance|version)?|studio\s*version|audio\s*only|visual\s*izer|explicit|uncensored|original\s*mix|clean\s*version|mono|stereo|full\s*album|album\s*version|extended|radio\s*edit|single\s*version|version\s*\d+\.?\d*|\d{4}\s*remaster|prod\.\s*[^\]\)]+)[\]\)]/gi, '')
+      // Remover sufixos sem parênteses
+      .replace(/\s+(?:official\s*(?:music\s*)?(?:video|audio|visualizer)|4k|8k|hq|hd|remaster(?:ed)?|mv|live|explicit)$/gi, '')
       // Remover sufixos em PT-BR comuns
       .replace(/\s*[-|–—]\s*(clipe\s+oficial|vídeo\s+oficial|ao\s+vivo|letra)$/gi, '')
       // Remover separadores adicionais "| Canal"
@@ -867,13 +815,16 @@ class QueueManager {
     if (!LASTFM_API_KEY) throw new Error('Last.FM API key not set');
 
     try {
-      console.log(`[LASTFM] 🔍 Buscando: "${artistName}" - "${trackName}"`);
+      // Sanitize inputs: remove tags like (Official Music Video), [Lyric Video], etc.
+      const cleanArtist = String(artistName || '').replace(/\s+/g, ' ').trim();
+      const cleanTrack = this._cleanTitle(String(trackName || ''));
+      console.log(`[LASTFM] 🔍 Buscando: "${cleanArtist}" - "${cleanTrack}"`);
       
       const url =
         `https://ws.audioscrobbler.com/2.0/?` +
         `method=track.getsimilar` +
-        `&artist=${encodeURIComponent(artistName)}` +
-        `&track=${encodeURIComponent(trackName)}` +
+        `&artist=${encodeURIComponent(cleanArtist)}` +
+        `&track=${encodeURIComponent(cleanTrack)}` +
         `&limit=${limit}` +
         `&api_key=${LASTFM_API_KEY}` +
         `&format=json`;

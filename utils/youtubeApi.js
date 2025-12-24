@@ -1,27 +1,48 @@
 const axios = require('axios');
+const { runYtDlp } = require('./ytDlp');
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const API_BASE = 'https://www.googleapis.com/youtube/v3';
-const PIPED_BASE = process.env.PIPED_API_BASE || 'https://piped.video/api/v1';
+const LASTFM_API_KEY = process.env.LASTFM_API_KEY;
+// Simple circuit breaker to avoid spamming 403 errors
+let apiForbiddenUntil = 0; // epoch ms until which API calls are skipped
+let apiWarnedDuringBlock = false;
+// Piped disabled due to instability; prefer Last.FM-assisted yt-dlp fallback
 
-async function searchPiped(query) {
+async function searchViaLastFM(query) {
+  if (!LASTFM_API_KEY) return null;
   try {
-    const res = await axios.get(`${PIPED_BASE}/search`, {
-      params: { q: query },
-      timeout: 5000
+    const url = `https://ws.audioscrobbler.com/2.0/?method=track.search&track=${encodeURIComponent(query)}&limit=1&api_key=${LASTFM_API_KEY}&format=json`;
+    const res = await axios.get(url, { timeout: 5000 });
+    const t = res.data?.results?.trackmatches?.track?.[0];
+    if (!t || !t.name || !t.artist) return null;
+    return `${t.artist} - ${t.name}`;
+  } catch (e) {
+    console.error('[LASTFM] Erro search:', e.message);
+    return null;
+  }
+}
+
+async function ytSearchBasic(query, count = 1) {
+  try {
+    const args = [
+      `ytsearch${count}:${query}`,
+      '--skip-download',
+      '--no-playlist',
+      '--no-warnings',
+      '--extractor-retries','1',
+      '--socket-timeout','5',
+      '--print','%(id)s|||%(title)s|||%(uploader)s|||%(thumbnail)s'
+    ];
+    const { stdout } = await runYtDlp(args);
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+    const results = lines.map(l => {
+      const [id, title, uploader, thumb] = l.split('|||');
+      return { videoId: id, title, channel: uploader || '', thumbnail: thumb || '', channelId: '' };
     });
-    const items = Array.isArray(res.data) ? res.data : [];
-    const video = items.find(i => (i.type === 'video' || i.type === 'stream') && i.id && i.title);
-    if (!video) return null;
-    return {
-      videoId: video.id,
-      title: video.title,
-      channel: video.uploaderName || video.uploader || '',
-      thumbnail: video.thumbnail || video.thumbnailURL || '',
-      channelId: video.uploaderId || ''
-    };
+    return results.length ? results : null;
   } catch (err) {
-    console.error('[PIPED] Erro search:', err.message);
+    console.error('[YT-DLP] Erro search:', err.message);
     return null;
   }
 }
@@ -32,42 +53,10 @@ async function searchPiped(query) {
  * @returns {Promise<{videoId: string, title: string, channel: string, thumbnail: string, channelId: string}|null>}
  */
 async function searchYouTube(query) {
-  if (!YOUTUBE_API_KEY) {
-    // Fallback rápido: Piped
-    return await searchPiped(query);
-  }
-
-  try {
-    const response = await axios.get(`${API_BASE}/search`, {
-      params: {
-        part: 'snippet',
-        q: query,
-        type: 'video',
-        maxResults: 1,
-        key: YOUTUBE_API_KEY,
-        videoCategoryId: '10'
-      },
-      timeout: 5000
-    });
-
-    if (!response.data.items || response.data.items.length === 0) {
-      return null;
-    }
-
-    const item = response.data.items[0];
-    return {
-      videoId: item.id.videoId,
-      title: item.snippet.title,
-      channel: item.snippet.channelTitle,
-      thumbnail: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default?.url,
-      channelId: item.snippet.channelId
-    };
-  } catch (error) {
-    console.error('[YOUTUBE API] Erro na busca:', error.message);
-    // Fallback rápido: Piped
-    try { return await searchPiped(query); } catch {}
-    return null;
-  }
+  // Sempre usa yt-dlp para busca (gratuito, sem quota)
+  const lf = await searchViaLastFM(query);
+  const res = await ytSearchBasic(lf || query, 1);
+  return res ? res[0] : null;
 }
 
 /**
@@ -76,60 +65,75 @@ async function searchYouTube(query) {
  * @returns {Promise<{videoId: string, title: string, channel: string, duration: string, thumbnail: string, views: number}|null>}
  */
 async function getVideoDetails(videoId) {
-  if (!YOUTUBE_API_KEY) {
-    return await getVideoDetailsPiped(videoId);
-  }
+  // Prioriza YouTube API para detalhes (1 unidade, rápido)
+  if (YOUTUBE_API_KEY && Date.now() >= apiForbiddenUntil) {
+    try {
+      const response = await axios.get(`${API_BASE}/videos`, {
+        params: {
+          part: 'snippet,contentDetails,statistics',
+          id: videoId,
+          key: YOUTUBE_API_KEY
+        },
+        timeout: 5000
+      });
 
-  try {
-    const response = await axios.get(`${API_BASE}/videos`, {
-      params: {
-        part: 'snippet,contentDetails,statistics',
-        id: videoId,
-        key: YOUTUBE_API_KEY
-      },
-      timeout: 5000
-    });
-
-    if (!response.data.items || response.data.items.length === 0) {
-      return null;
+      if (response.data.items && response.data.items.length > 0) {
+        const video = response.data.items[0];
+        return {
+          videoId: video.id,
+          title: video.snippet.title,
+          channel: video.snippet.channelTitle,
+          channelId: video.snippet.channelId,
+          duration: parseDuration(video.contentDetails.duration),
+          thumbnail: video.snippet.thumbnails.maxres?.url || video.snippet.thumbnails.high?.url,
+          views: parseInt(video.statistics.viewCount || 0),
+          description: video.snippet.description
+        };
+      }
+    } catch (error) {
+      const status = error?.response?.status;
+      if (status === 403) {
+        // Block further API calls for a cooldown window to reduce noisy logs
+        apiForbiddenUntil = Date.now() + 15 * 60 * 1000; // 15 minutes
+        apiWarnedDuringBlock = false; // reset so we warn once below
+        console.warn('[YOUTUBE API] 403 ao obter detalhes → desativando API por 15 min; usando yt-dlp como fallback');
+      } else {
+        console.error('[YOUTUBE API] Erro ao obter detalhes:', error.message);
+      }
     }
-
-    const video = response.data.items[0];
-    return {
-      videoId: video.id,
-      title: video.snippet.title,
-      channel: video.snippet.channelTitle,
-      channelId: video.snippet.channelId,
-      duration: parseDuration(video.contentDetails.duration),
-      thumbnail: video.snippet.thumbnails.maxres?.url || video.snippet.thumbnails.high?.url,
-      views: parseInt(video.statistics.viewCount || 0),
-      description: video.snippet.description
-    };
-  } catch (error) {
-    console.error('[YOUTUBE API] Erro ao obter detalhes:', error.message);
-    // Fallback: Piped
-    try { return await getVideoDetailsPiped(videoId); } catch {}
-    return null;
   }
+  // If API is currently blocked, warn once (not on every call)
+  if (YOUTUBE_API_KEY && Date.now() < apiForbiddenUntil && !apiWarnedDuringBlock) {
+    console.warn('[YOUTUBE API] desativada temporariamente devido a 403; usando yt-dlp');
+    apiWarnedDuringBlock = true;
+  }
+  // Fallback: yt-dlp metadata
+  return await getVideoDetailsYtDlp(videoId);
 }
 
-async function getVideoDetailsPiped(videoId) {
+async function getVideoDetailsYtDlp(videoId) {
   try {
-    const res = await axios.get(`${PIPED_BASE}/videos/${videoId}`, { timeout: 5000 });
-    const v = res.data || {};
-    // Piped retorna duration (segundos) e durationString
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const args = [
+      url,
+      '--skip-download',
+      '--no-playlist',
+      '--no-warnings',
+      '--print','%(title)s|||%(uploader)s|||%(duration_string)s|||%(thumbnail)s'
+    ];
+    const { stdout } = await runYtDlp(args);
+    const [title, uploader, duration, thumb] = (stdout.trim().split('|||')).map(s => s || '');
     return {
       videoId,
-      title: v.title || '',
-      channel: v.uploader || v.uploaderName || '',
-      channelId: v.uploaderId || '',
-      duration: v.durationString || (typeof v.duration === 'number' ? `${Math.floor(v.duration/60)}:${String(v.duration%60).padStart(2,'0')}` : undefined),
-      thumbnail: v.thumbnail || '',
-      views: v.views || 0,
-      description: v.description || ''
+      title,
+      channel: uploader,
+      duration,
+      thumbnail: thumb,
+      views: 0,
+      description: ''
     };
   } catch (err) {
-    console.error('[PIPED] Erro getVideoDetails:', err.message);
+    console.error('[YT-DLP] Erro detalhes:', err.message);
     return null;
   }
 }
@@ -141,7 +145,7 @@ async function getVideoDetailsPiped(videoId) {
  * @returns {Promise<{title: string, videos: Array}|null>}
  */
 async function getPlaylistItems(playlistId, maxResults = 100) {
-  if (!YOUTUBE_API_KEY) {
+  if (!YOUTUBE_API_KEY || Date.now() < apiForbiddenUntil) {
     return await getPlaylistItemsPiped(playlistId, maxResults);
   }
 
@@ -200,7 +204,14 @@ async function getPlaylistItems(playlistId, maxResults = 100) {
       videos: videos
     };
   } catch (error) {
-    console.error('[YOUTUBE API] Erro ao buscar playlist:', error.message);
+    const status = error?.response?.status;
+    if (status === 403) {
+      apiForbiddenUntil = Date.now() + 15 * 60 * 1000;
+      apiWarnedDuringBlock = false;
+      console.warn('[YOUTUBE API] 403 ao buscar playlist → desativando API por 15 min; fallback Piped');
+    } else {
+      console.error('[YOUTUBE API] Erro ao buscar playlist:', error.message);
+    }
     // Fallback: Piped
     try { return await getPlaylistItemsPiped(playlistId, maxResults); } catch {}
     return null;
@@ -260,23 +271,10 @@ module.exports = {
 
 // Busca múltiplos resultados no YouTube (útil para recomendações de fallback)
 async function searchYouTubeMultiple(query, maxResults = 5) {
-  if (!YOUTUBE_API_KEY) {
-    // Piped fallback
-    try {
-      const res = await axios.get(`${PIPED_BASE}/search`, { params: { q: query }, timeout: 5000 });
-      const items = Array.isArray(res.data) ? res.data : [];
-      const videos = items.filter(i => (i.type === 'video' || i.type === 'stream')).slice(0, maxResults);
-      if (videos.length === 0) return null;
-      return videos.map(v => ({
-        videoId: v.id,
-        title: v.title,
-        channel: v.uploaderName || v.uploader || '',
-        thumbnail: v.thumbnail || ''
-      }));
-    } catch (err) {
-      console.error('[PIPED] Erro search multiple:', err.message);
-      return null;
-    }
+  if (!YOUTUBE_API_KEY || Date.now() < apiForbiddenUntil) {
+    const lf = await searchViaLastFM(query);
+    const res = await ytSearchBasic(lf || query, Math.max(1, maxResults));
+    return res;
   }
 
   try {
@@ -301,7 +299,12 @@ async function searchYouTubeMultiple(query, maxResults = 5) {
     }));
   } catch (error) {
     try {
-      if (error.response) {
+      const status = error?.response?.status;
+      if (status === 403) {
+        apiForbiddenUntil = Date.now() + 15 * 60 * 1000;
+        apiWarnedDuringBlock = false;
+        console.warn('[YOUTUBE API] 403 em search → desativando API por 15 min; usando yt-dlp');
+      } else if (error.response) {
         console.error('[YOUTUBE API] Erro searchYouTubeMultiple:', error.response.status, error.response.data && (typeof error.response.data === 'object' ? JSON.stringify(error.response.data) : error.response.data));
       } else {
         console.error('[YOUTUBE API] Erro searchYouTubeMultiple:', error.message);
@@ -309,22 +312,9 @@ async function searchYouTubeMultiple(query, maxResults = 5) {
     } catch (e) {
       console.error('[YOUTUBE API] Erro ao tratar erro em searchYouTubeMultiple:', e.message);
     }
-    // Fallback Piped
-    try {
-      const res = await axios.get(`${PIPED_BASE}/search`, { params: { q: query }, timeout: 5000 });
-      const items = Array.isArray(res.data) ? res.data : [];
-      const videos = items.filter(i => (i.type === 'video' || i.type === 'stream')).slice(0, maxResults);
-      if (videos.length === 0) return null;
-      return videos.map(v => ({
-        videoId: v.id,
-        title: v.title,
-        channel: v.uploaderName || v.uploader || '',
-        thumbnail: v.thumbnail || ''
-      }));
-    } catch (err) {
-      console.error('[PIPED] Erro search multiple fallback:', err.message);
-      return null;
-    }
+    const lf = await searchViaLastFM(query);
+    const res = await ytSearchBasic(lf || query, Math.max(1, maxResults));
+    return res;
   }
 }
 

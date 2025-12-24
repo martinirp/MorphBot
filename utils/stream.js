@@ -6,6 +6,19 @@ function createOpusStream(videoId) {
 }
 
 function createOpusStreamFromUrl(url) {
+  const bitrateK = (() => {
+    const v = parseInt(process.env.OPUS_BITRATE_K || '96', 10);
+    if (Number.isNaN(v)) return 96;
+    return Math.min(512, Math.max(16, v));
+  })();
+  const compLevel = (() => {
+    const v = parseInt(process.env.OPUS_COMPRESSION_LEVEL || '10', 10);
+    if (Number.isNaN(v)) return 10;
+    return Math.min(10, Math.max(0, v));
+  })();
+
+  console.log(`[STREAM] ffmpeg opus settings: bitrate=${bitrateK}k compression=${compLevel}`);
+
   const ytdlp = spawn('yt-dlp', ['-f', 'bestaudio', '-o', '-', url], {
     stdio: ['ignore', 'pipe', 'ignore']
   });
@@ -14,42 +27,58 @@ function createOpusStreamFromUrl(url) {
     '-i', 'pipe:0',
     '-f', 'ogg',
     '-acodec', 'libopus',
-    '-b:a', '96k',
-    '-compression_level', '10',
+    '-b:a', `${bitrateK}k`,
+    '-compression_level', String(compLevel),
     'pipe:1'
   ], {
     stdio: ['pipe', 'pipe', 'ignore']
   });
 
+  // Conectar pipeline de forma explícita
   ytdlp.stdout.pipe(ffmpeg.stdin);
+
+  // Propagar erros do pipeline (sem causar exceções no consumidor)
+  ytdlp.on('error', err => {
+    console.error('[STREAM] yt-dlp erro:', err?.message || err);
+    try { ffmpeg.stdin.end(); } catch {}
+  });
+  ffmpeg.on('error', err => {
+    console.error('[STREAM] ffmpeg erro:', err?.message || err);
+  });
   
-  // Propagar erros do pipeline
-  ytdlp.on('error', err => ffmpeg.stdout.emit('error', err));
-  ffmpeg.on('error', err => ffmpeg.stdout.emit('error', err));
-  
-  // 🟢 Buffer estratégico: aguarda ~512KB antes de iniciar playback
+  // Passar stream diretamente sem buffer estratégico
   const { PassThrough } = require('stream');
   const bufferedStream = new PassThrough();
-  let bufferSize = 0;
-  const BUFFER_THRESHOLD = 512 * 1024; // 512KB
-  let bufferReady = false;
 
   ffmpeg.stdout.on('data', chunk => {
-    if (!bufferReady) {
-      bufferSize += chunk.length;
-      if (bufferSize >= BUFFER_THRESHOLD) {
-        bufferReady = true;
-        console.log('[STREAM] buffer estratégico pronto (512KB), iniciando playback');
-      }
+    // Respeitar backpressure: pausar leitura se necessário
+    if (!bufferedStream.push(chunk)) {
+      try { ffmpeg.stdout.pause(); } catch {}
+      bufferedStream.once('drain', () => {
+        try { ffmpeg.stdout.resume(); } catch {}
+      });
     }
-    bufferedStream.push(chunk);
   });
 
-  ffmpeg.stdout.on('end', () => bufferedStream.end());
-  ffmpeg.stdout.on('error', err => bufferedStream.destroy(err));
+  ffmpeg.stdout.on('end', () => {
+    console.log('[STREAM] stream finalizado normalmente');
+    bufferedStream.end();
+  });
+  ffmpeg.stdout.on('close', () => {
+    try { bufferedStream.end(); } catch {}
+  });
+  ffmpeg.stdout.on('error', err => {
+    console.error('[STREAM] stdout erro:', err?.message || err);
+    try { bufferedStream.end(); } catch {}
+  });
 
-  // Armazenar flag de readiness para queueManager verificar
-  bufferedStream.isBufferReady = () => bufferReady;
+  // Encerramento coordenado dos processos quando o consumidor termina
+  const cleanup = () => {
+    try { ytdlp.kill('SIGKILL'); } catch {}
+    try { ffmpeg.kill('SIGKILL'); } catch {}
+  };
+  bufferedStream.on('close', cleanup);
+  bufferedStream.on('end', cleanup);
 
   return bufferedStream;
 }
